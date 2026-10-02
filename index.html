@@ -1,0 +1,756 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>漫畫分鏡工作台</title>
+<style>
+:root{
+  --bg:#0f1117; --panel:#171b24; --panel2:#1e2430; --line:#2a3140;
+  --fg:#e8ecf4; --mut:#8b95a5; --acc:#5b8def; --acc2:#c98a3e;
+  --ok:#3fa88a; --bad:#e05563; --warn:#d4a45c;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--fg);
+  font-family:'Noto Sans TC','PingFang TC','Microsoft JhengHei',system-ui,sans-serif;
+  font-size:14px;line-height:1.6}
+header{background:var(--panel);border-bottom:1px solid var(--line);
+  padding:14px 22px;display:flex;align-items:center;gap:16px;flex-wrap:wrap;position:sticky;top:0;z-index:20}
+header h1{font-size:17px;font-weight:700}
+.badge{background:var(--panel2);border:1px solid var(--line);border-radius:6px;
+  padding:3px 9px;font-size:12px;color:var(--mut);font-family:ui-monospace,monospace}
+.badge b{color:var(--acc);font-weight:600}
+main{max-width:1400px;margin:0 auto;padding:22px}
+.tabs{display:flex;gap:6px;margin-bottom:20px;border-bottom:1px solid var(--line)}
+.tab{padding:9px 16px;background:none;border:none;border-bottom:2px solid transparent;
+  color:var(--mut);cursor:pointer;font-size:14px;font-family:inherit}
+.tab.on{color:var(--fg);border-bottom-color:var(--acc)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  padding:18px;margin-bottom:16px}
+.card h2{font-size:15px;margin-bottom:4px;overflow-wrap:anywhere}
+.card .hint{color:var(--mut);font-size:13px;margin-bottom:14px}
+.drop{border:2px dashed var(--line);border-radius:10px;padding:30px;text-align:center;
+  cursor:pointer;transition:.15s;background:var(--panel2)}
+.drop:hover,.drop.over{border-color:var(--acc);background:#1a2130}
+.drop .big{font-size:34px;margin-bottom:6px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+button{background:var(--acc);color:#fff;border:none;border-radius:7px;
+  padding:9px 18px;font-size:14px;cursor:pointer;font-family:inherit;font-weight:500}
+button:hover{filter:brightness(1.12)}
+button:disabled{background:var(--line);color:var(--mut);cursor:not-allowed;filter:none}
+button.ghost{background:transparent;border:1px solid var(--line);color:var(--fg)}
+button.ghost:hover{border-color:var(--acc)}
+button.sm{padding:5px 11px;font-size:12px}
+.prog{height:5px;background:var(--line);border-radius:3px;overflow:hidden;margin-top:12px}
+.prog i{display:block;height:100%;background:var(--acc);width:0;transition:.4s}
+.hidden{display:none!important}
+pre{background:#0c0e14;border:1px solid var(--line);border-radius:7px;
+  padding:11px;overflow:auto;font-family:ui-monospace,'SF Mono',Menlo,monospace;
+  font-size:12px;line-height:1.55;white-space:pre-wrap;word-break:break-word;max-height:340px}
+.tag{display:inline-block;background:var(--panel2);border:1px solid var(--line);
+  border-radius:4px;padding:1px 7px;font-size:11px;margin-right:5px}
+.tag.CH{border-color:#4a6fa5;color:#8fb0e0}
+.tag.SC{border-color:#6b5327;color:#d4a45c}
+.tag.SH{border-color:#3d6b5c;color:#6fc4a8}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{color:var(--mut);font-weight:600;font-size:12px;background:var(--panel2);position:sticky;top:52px}
+tr:hover td{background:#1a1f2b}
+.tbl-wrap{max-height:60vh;overflow:auto;border:1px solid var(--line);border-radius:8px;
+  -webkit-overflow-scrolling:touch}
+.tbl-wrap table{min-width:1040px}
+@media(max-width:900px){
+  main{padding:12px}
+  .card{padding:13px}
+  .two{grid-template-columns:1fr}
+  header{gap:8px;padding:10px 13px}
+}
+.blk{color:var(--bad);font-weight:700}
+.min{color:var(--warn,#d4a45c);font-weight:700}
+.score{font-size:30px;font-weight:700}
+.score.PASS{color:var(--ok)} .score.NEEDS_FIX{color:var(--bad)}
+.pill{padding:2px 9px;border-radius:20px;font-size:11px;font-weight:700}
+.pill.PASS{background:rgba(63,168,138,.16);color:var(--ok)}
+.pill.NEEDS_FIX{background:rgba(224,85,99,.16);color:var(--bad)}
+.prev{max-width:190px;max-height:130px;border-radius:5px;border:1px solid var(--line);cursor:zoom-in}
+.empty{color:var(--mut);text-align:center;padding:26px}
+.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);
+  background:var(--panel2);border:1px solid var(--acc);border-radius:8px;
+  padding:11px 20px;z-index:99;box-shadow:0 8px 26px rgba(0,0,0,.45)}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:900px){.two{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>漫畫分鏡工作台</h1>
+  <span class="badge">模型 <b id="mdl">qwen3.8-27b</b></span>
+  <span class="badge">端點 <b>127.0.0.1:8081</b></span>
+  <span class="badge" id="stBadge" style="margin-left:auto">就緒</span>
+</header>
+
+<main>
+  <div class="tabs">
+    <button class="tab on" data-t="a">① 上傳漫畫 → 分鏡</button>
+    <button class="tab" data-t="b">② 分鏡圖回饋</button>
+    <button class="tab" data-t="c">③ 問題修復（根因分析）</button>
+    <button class="tab" data-t="d">④ 記憶庫</button>
+  </div>
+
+  <!-- ═══ TAB A ═══ -->
+  <section id="ta">
+    <div class="card" id="histCard" style="display:none">
+      <div class="row" style="justify-content:space-between;align-items:flex-start;
+                    gap:12px;margin-bottom:10px">
+        <h2 style="margin:0">📂 歷史專案</h2>
+        <button class="ghost sm" id="histToggle">收合</button>
+      </div>
+      <div id="histList"></div>
+    </div>
+    <div class="card">
+      <h2>上傳漫畫頁</h2>
+      <div class="hint">支援 JPG / PNG / WebP / GIF，可一次選多頁。頁數越多分析越久（每頁約需數十秒）。</div>
+      <div class="drop" id="drop">
+        <div class="big">📄</div>
+        <div><b>點擊選擇</b> 或拖曳漫畫頁到這裡</div>
+        <div class="hint" style="margin:8px 0 0">建議先刪掉對話框多的頁，或分批處理</div>
+      </div>
+      <input type="file" id="file" multiple accept="image/*" class="hidden">
+      <div id="thumbs" class="row" style="margin-top:14px"></div>
+      <div class="row" style="margin-top:14px">
+        <input id="title" placeholder="作品／話數名稱（選填）"
+               style="flex:1;min-width:200px;background:var(--panel2);border:1px solid var(--line);
+                      border-radius:7px;padding:9px 12px;color:var(--fg);font-family:inherit">
+        <button id="go">開始分析</button>
+      </div>
+      <div class="prog hidden" id="pg"><i></i></div>
+      <div id="pgTxt" class="hint" style="margin-top:8px"></div>
+    </div>
+
+    <div id="out" class="hidden">
+      <div class="card">
+        <div class="row" style="justify-content:space-between;align-items:flex-start">
+          <div style="flex:1">
+            <h2>📋 作品資訊</h2>
+            <div id="meta"></div>
+          </div>
+          <div style="text-align:right">
+            <div class="hint" style="margin-bottom:6px">匯出（已自動存檔）</div>
+            <div class="row" style="justify-content:flex-end">
+              <button class="ghost sm" id="exMd">Markdown</button>
+              <button class="ghost sm" id="exCsv">CSV</button>
+              <button class="ghost sm" id="exJson">JSON</button>
+            </div>
+            <div class="hint" style="margin-top:6px">專案 ID：<code id="pidShow">—</code></div>
+          </div>
+        </div>
+      </div>
+      <div class="card" id="bibleCard" style="display:none">
+        <div class="row" style="justify-content:space-between;align-items:flex-start;
+                    gap:12px;margin-bottom:4px">
+          <h2 style="margin:0;min-width:0;flex:1 1 auto;overflow-wrap:anywhere">
+            🎨 全域美術基準
+            <span class="hint" style="display:inline;font-weight:400">（提煉後的整片風格與場景）</span>
+          </h2>
+          <div class="row" style="flex:0 0 auto">
+            <button class="ghost sm" id="cpBible">複製全文</button>
+            <button class="ghost sm" id="dlBible">下載 .md</button>
+          </div>
+        </div>
+        <div class="hint">這份是導演視角的整片基準，不是逐格複述。生圖前先看這份，全片風格才不會散掉。</div>
+        <pre id="bibleTxt" style="max-height:560px"></pre>
+      </div>
+      <div class="card">
+        <h2>🎭 角色設定檔 <span class="hint" style="display:inline">（一致性關鍵，之後每格提示詞都會逐字引用）</span></h2>
+        <div id="chars"></div>
+      </div>
+      <div class="card">
+        <h2>🏙 場景表</h2>
+        <div id="scenes"></div>
+      </div>
+      <div class="card">
+        <div class="row" style="justify-content:space-between;align-items:flex-start;
+                    gap:12px;margin-bottom:12px">
+          <h2 style="margin:0;min-width:0;flex:1 1 auto;overflow-wrap:anywhere">
+            🎬 逐鏡描述與提示詞
+            <span id="shotN" class="hint" style="display:inline;font-weight:400"></span>
+          </h2>
+          <div class="row" style="flex:0 0 auto">
+            <span id="memBadge" class="hint" style="display:none"></span>
+            <button class="ghost sm" id="copyAll">複製全部提示詞</button>
+          </div>
+        </div>
+        <div class="hint" style="margin:-4px 0 10px">
+          鏡頭是<b>重新設計的序列</b>，不是漫畫分格的逐一對應。
+          每個鏡頭 3–6 秒，用運鏡帶出變化，不會切得太快。
+        </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr>
+              <th style="width:62px">鏡號</th><th style="width:44px">頁</th>
+              <th style="width:96px">時長</th><th style="width:92px">景別</th>
+              <th style="width:96px">運鏡</th><th>動作 / 對白</th>
+              <th style="width:210px">生圖提示詞</th><th style="width:96px">狀態</th>
+            </tr></thead>
+            <tbody id="tBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ TAB B ═══ -->
+  <section id="tb" class="hidden">
+    <div class="card">
+      <h2>分鏡圖品質審查</h2>
+      <div class="hint">把生成的分鏡圖上傳，模型會比對目標提示詞與角色設定，指出問題並重寫提示詞。</div>
+      <div style="background:#241d14;border:1px solid #6b5327;border-radius:8px;padding:11px 13px;
+                  font-size:12.5px;color:#e0b070;margin-bottom:14px;line-height:1.65">
+        <b>本機模型視覺能力（實測）</b><br>
+        同一組測試下：讀文字 ✅、細節比對 ✅、數漫畫分格 ✅、顏色辨識 ✅、
+        <b>數手指 ❌（畫六根答八根）</b>。<br>
+        也就是說它看得見一般細節，但<b>計數能力不可靠</b>。
+        審查已切換為「先純觀察、再獨立比對」的中性框架，並在輸出矛盾時由規則層修正。
+        但<b>計數類問題仍請自己核對</b>。
+      </div>
+      <div class="two">
+        <div>
+          <div class="drop" id="drop2" style="padding:22px">
+            <div class="big">🖼</div><div><b>上傳分鏡圖</b></div>
+          </div>
+          <input type="file" id="file2" accept="image/*" class="hidden">
+          <img id="prev2" class="prev hidden" style="margin-top:12px;max-width:100%">
+        </div>
+        <div>
+          <label class="hint">目標生圖提示詞</label>
+          <textarea id="tp" rows="6" placeholder="貼上要審查的鏡頭提示詞"
+            style="width:100%;background:#0c0e14;border:1px solid var(--line);border-radius:7px;
+                   padding:10px;color:var(--fg);font-family:ui-monospace,monospace;font-size:12px"></textarea>
+          <label class="hint" style="display:block;margin-top:10px">角色設定（選填，但強烈建議填，否則無法檢查一致性）</label>
+          <textarea id="cc" rows="4" placeholder="貼上該角色的 appearance 描述"
+            style="width:100%;background:#0c0e14;border:1px solid var(--line);border-radius:7px;
+                   padding:10px;color:var(--fg);font-family:ui-monospace,monospace;font-size:12px"></textarea>
+          <textarea id="ex" rows="2" placeholder="補充說明（選填），例：我覺得角色臉不像"
+            style="width:100%;margin-top:10px;background:var(--panel2);border:1px solid var(--line);
+                   border-radius:7px;padding:10px;color:var(--fg);font-family:inherit;font-size:13px"></textarea>
+          <button id="rv" style="margin-top:12px;width:100%">開始審查</button>
+          <div id="rvTime" class="hint" style="margin-top:6px;text-align:center"></div>
+        </div>
+      </div>
+    </div>
+    <div id="rvOut" class="card hidden">
+      <div class="row" style="gap:26px;align-items:flex-start">
+        <div style="text-align:center">
+          <div class="score" id="sc">—</div>
+          <div class="pill" id="vd">—</div>
+        </div>
+        <div style="flex:1"><h2 id="nIss" style="font-size:14px"></h2></div>
+      </div>
+      <h2 style="font-size:14px;margin:18px 0 8px">👁 觀察（模型在圖上實際看到的）</h2>
+      <pre id="obsTxt" style="max-height:150px"></pre>
+<h2 style="font-size:14px;margin:18px 0 8px">🔍 問題清單</h2>
+      <div id="issues"></div>
+      <div class="two" style="margin-top:18px">
+        <div><h2 style="font-size:14px;margin-bottom:6px">✏️ 重寫後的提示詞</h2><pre id="rw"></pre>
+          <button class="ghost sm" id="cp1">複製</button></div>
+        <div><h2 style="font-size:14px;margin-bottom:6px">🚫 負面提示詞</h2><pre id="np"></pre>
+          <button class="ghost sm" id="cp2">複製</button></div>
+      </div>
+      <details style="margin-top:16px"><summary class="hint" style="cursor:pointer">原始輸出</summary>
+        <pre id="raw"></pre></details>
+    </div>
+  </section>
+
+  <!-- ═══ TAB C 修復 ═══ -->
+  <section id="tc" class="hidden">
+    <div class="card">
+      <h2>問題診斷與提示詞修補</h2>
+      <div class="hint">描述你在生成結果中發現的問題，模型會分析<b>為什麼會造成這個問題</b>，
+        修補提示詞，並把這次經驗記進記憶庫，之後所有鏡頭都會受影響。</div>
+      <div style="background:#152420;border:1px solid #2f5b4d;border-radius:8px;padding:11px 13px;
+                  font-size:12.5px;color:#8fb8a9;margin-bottom:14px;line-height:1.65">
+        <b>設計說明</b><br>
+        這裡<b>不依賴模型看圖</b>——本機 27B 模型的視覺細節辨識不可靠。
+        診斷依據是「你報告的問題」+「對提示詞的結構分析」，這恰好是文字模型擅長的。
+        圖片可選附上，僅作參考；若有衝突，以你的描述為準。
+      </div>
+
+      <div class="two">
+        <div>
+          <label class="hint">使用的提示詞（必填）</label>
+          <textarea id="f_prompt" rows="7" placeholder="貼上該鏡頭的生圖提示詞"
+            style="width:100%;background:#0c0e14;border:1px solid var(--line);border-radius:7px;
+                   padding:10px;color:var(--fg);font-family:ui-monospace,monospace;font-size:12px"></textarea>
+          <div class="row" style="margin-top:10px">
+            <div style="flex:1">
+              <label class="hint">角色設定（強烈建議填）</label>
+              <textarea id="f_chars" rows="4"
+                style="width:100%;background:#0c0e14;border:1px solid var(--line);border-radius:7px;
+                       padding:10px;color:var(--fg);font-family:ui-monospace,monospace;font-size:12px"></textarea>
+            </div>
+          </div>
+          <div class="row" style="margin-top:10px;gap:10px">
+            <div style="flex:1"><label class="hint">鏡頭編號（選填，用於統計）</label>
+              <input id="f_shot" style="width:100%;background:var(--panel2);border:1px solid var(--line);
+                border-radius:7px;padding:8px 11px;color:var(--fg);font-family:inherit"></div>
+            <div style="flex:1"><label class="hint">生成結果圖（選填）</label>
+              <input type="file" id="f_img" accept="image/*"
+                style="width:100%;font-size:12px;color:var(--mut)"></div>
+          </div>
+        </div>
+        <div>
+          <label class="hint">你發現的問題（必填，寫得越具體診斷越準）</label>
+          <textarea id="f_sym" rows="5"
+            placeholder="例：角色的手變成六根手指／每格角色長得都不一样／角色穿著變了／背景多出不該有的東西"
+            style="width:100%;background:#0c0e14;border:1px solid var(--line);border-radius:7px;
+                   padding:10px;color:var(--fg);font-family:inherit;font-size:13px"></textarea>
+          <div class="hint" style="margin-top:8px">常見症狀點選：</div>
+          <div class="row" id="quick" style="margin:6px 0"></div>
+          <button id="fxBtn" style="margin-top:12px;width:100%">診斷並修復</button>
+          <div id="fxHint" class="hint" style="margin-top:8px"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="fxOut" class="card hidden">
+      <div class="row" style="gap:24px;align-items:flex-start;margin-bottom:16px">
+        <div><div class="hint">根因分類</div>
+          <div id="fxCat" style="font-size:16px;font-weight:700;color:var(--acc2)"></div>
+          <div id="fxRule" class="hint" style="margin-top:3px"></div></div>
+        <div style="flex:1"><div class="hint">機制說明（為什麼會這樣）</div>
+          <div id="fxWhy" style="font-size:13.5px;margin-top:4px;line-height:1.7"></div></div>
+      </div>
+      <div style="background:var(--panel2);border-left:3px solid var(--acc);
+                  padding:9px 13px;border-radius:0 7px 7px 0;margin-bottom:16px">
+        <div class="hint">提示詞中的證據</div>
+        <code id="fxEv" style="font-size:12px;color:#9db8e0"></code></div>
+      <h2 style="font-size:14px;margin-bottom:8px">🔧 修改了什麼</h2>
+      <div id="fxChg" style="margin-bottom:16px"></div>
+      <div class="two">
+        <div><h2 style="font-size:14px;margin-bottom:6px">✏️ 修補後的提示詞</h2>
+          <pre id="fxNew"></pre><button class="ghost sm" id="fxCp">複製</button></div>
+        <div><h2 style="font-size:14px;margin-bottom:6px">🚫 負面提示詞</h2>
+          <pre id="fxNeg"></pre><button class="ghost sm" id="fxNp">複製</button></div>
+      </div>
+      <div style="background:#241d14;border:1px solid #6b5327;border-radius:8px;
+                  padding:12px 14px;margin-top:16px">
+        <div style="font-size:13px"><b style="color:#e0b070">⚠ 殘餘風險</b><br>
+          <span id="fxRisk" style="color:#b39a72"></span></div>
+        <div style="font-size:13px;margin-top:8px"><b style="color:#e0b070">🛡 預防</b><br>
+          <span id="fxPrev" style="color:#b39a72"></span></div>
+      </div>
+      <div class="row" style="margin-top:16px;gap:10px">
+        <button class="ghost" id="fxBack">把修補結果套回此鏡頭</button>
+        <button class="ghost" id="fxAgain">以新提示詞再診斷一次</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ TAB D 記憶 ═══ -->
+  <section id="td" class="hidden">
+    <div class="card">
+      <div class="row" style="justify-content:space-between;align-items:flex-start;
+                    gap:12px;margin-bottom:6px">
+        <h2 style="margin:0">🧠 記憶庫</h2>
+        <div class="row">
+          <button class="ghost sm" id="memRefresh">重新整理</button>
+          <button class="ghost sm" id="memClear">清空記憶</button>
+        </div>
+      </div>
+      <div class="hint">每次修復都會寫入這裡。累積越多，後續鏡頭的提示詞會自動帶上已驗證的規律。</div>
+      <div class="row" style="margin:14px 0">
+        <div style="flex:1;text-align:center;border:1px solid var(--line);border-radius:9px;padding:14px">
+          <div style="font-size:26px;font-weight:700;color:var(--acc2)" id="mTotal">0</div>
+          <div class="hint">累計修正次數</div></div>
+        <div style="flex:1;text-align:center;border:1px solid var(--line);border-radius:9px;padding:14px">
+          <div style="font-size:26px;font-weight:700;color:var(--acc)" id="mKeys">0</div>
+          <div class="hint">不重複的提示詞</div></div>
+        <div style="flex:1;text-align:center;border:1px solid var(--line);border-radius:9px;padding:14px">
+          <div style="font-size:26px;font-weight:700;color:var(--ok)" id="mLes">0</div>
+          <div class="hint">歸納出的規律</div></div>
+      </div>
+      <h2 style="font-size:14px;margin-bottom:8px">📐 已歸納的規律（依出現次數排序）</h2>
+      <div id="mLessons"></div>
+      <h2 style="font-size:14px;margin:20px 0 8px">📚 最近修正記錄</h2>
+      <div id="mRecent"></div>
+    </div>
+    <div class="card">
+      <h2>📖 內建根因規則庫</h2>
+      <div class="hint">固定的規則表。即使模型失敗，仍會依此給出修法。</div>
+      <div id="mRules"></div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+let PROJ=null, DATA=null, FILES=[];
+
+$$('.tab').forEach(b=>b.onclick=()=>{
+  $$('.tab').forEach(x=>x.classList.toggle('on',x===b));
+  $('#ta').classList.toggle('hidden',b.dataset.t!=='a');
+  $('#tb').classList.toggle('hidden',b.dataset.t!=='b');
+});
+
+function toast(m){const t=document.createElement('div');t.className='toast';t.textContent=m;
+  document.body.appendChild(t);setTimeout(()=>t.remove(),2600);}
+
+function setupDrop(dz,inp,cb){
+  dz.onclick=()=>inp.click();
+  dz.ondragover=e=>{e.preventDefault();dz.classList.add('over')};
+  dz.ondragleave=()=>dz.classList.remove('over');
+  dz.ondrop=e=>{e.preventDefault();dz.classList.remove('over');
+    inp.files=e.dataTransfer.files;cb([...inp.files])};
+}
+setupDrop($('#drop'),$('#file'),showThumbs);
+function showThumbs(fs){FILES=fs;$('#thumbs').innerHTML='';
+  fs.forEach(f=>{const d=document.createElement('div');
+    d.style.cssText='width:66px;height:88px;border:1px solid var(--line);border-radius:6px;overflow:hidden;position:relative';
+    d.innerHTML=`<img src="${URL.createObjectURL(f)}" style="width:100%;height:100%;object-fit:cover">
+      <span style="position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,.65);color:#fff;font-size:10px;text-align:center;padding:1px">${f.name.slice(0,9)}</span>`;
+    $('#thumbs').appendChild(d);});
+  if(fs.length)toast(`已選 ${fs.length} 頁`);}
+$('#file').onchange=e=>showThumbs([...e.target.files]);
+
+$('#go').onclick=async()=>{
+  if(!FILES.length)return toast('請先選擇漫畫頁');
+  const fd=new FormData();FILES.forEach(f=>fd.append('files',f));
+  fd.append('title',$('#title').value);
+  $('#go').disabled=true;$('#pg').classList.remove('hidden');
+  $('#stBadge').textContent='分析中…';
+  try{
+    const r=await fetch('/api/analyze',{method:'POST',body:fd});
+    const j=await r.json();
+    if(!r.ok)throw new Error(j.detail||'上傳失敗');
+    poll(j.project_id,j.pages);
+  }catch(e){toast('錯誤：'+e.message);reset();}
+};
+function reset(){$('#go').disabled=false;$('#pg').classList.add('hidden');$('#stBadge').textContent='就緒';}
+
+async function poll(pid,n){
+  const t0=Date.now();
+  for(;;){
+    await new Promise(r=>setTimeout(r,1800));
+    try{
+      const s=await (await fetch('/api/status/'+pid)).json();
+      const pct=Math.round((Date.now()-t0)/1000/ (n*12) *100);
+      $('#pg i').style.width=Math.min(96,pct)+'%';
+      $('#pgTxt').textContent=s.progress||s.status;
+      if(s.status==='done'){$('#pg i').style.width='100%';
+        const d=await (await fetch('/api/project/'+pid)).json();
+        DATA=d;PROJ=pid;render(d);toast('完成！');reset();return;}
+      if(s.status==='error')throw new Error(s.error);
+    }catch(e){toast('錯誤：'+e.message);reset();return;}
+  }
+}
+
+function render(d){
+  $('#out').classList.remove('hidden');
+  if(PROJ){const p=$('#pidShow');if(p)p.textContent=PROJ;}
+  loadProjects();
+  $('#meta').innerHTML=`<div style="font-size:17px;font-weight:600;margin-bottom:6px">${esc(d.title||'未命名')}</div>
+    <div class="hint">${esc(d.logline||'')}</div>
+    <div class="row" style="margin-top:10px">
+      <span class="tag">頁數 ${d.page_count}</span>
+      <span class="tag">鏡頭 ${d.shots.length}</span>
+      <span class="tag">預估 ${esc(d.estimated_duration||'?')}</span></div>
+    <div style="margin-top:12px"><span class="hint">全域畫風：</span><code style="font-size:12px">${esc(d.global_style||'')}</code></div>`;
+
+  // 美術基準
+  if(d.art_bible){
+    $('#bibleCard').style.display='';
+    $('#bibleTxt').textContent=d.art_bible;
+  }else{
+    $('#bibleCard').style.display='none';
+  }
+
+  $('#chars').innerHTML=(d.characters||[]).map(c=>`
+    <div style="border:1px solid var(--line);border-radius:8px;padding:12px;margin-bottom:9px">
+      <div class="row" style="justify-content:space-between">
+        <b><span class="tag CH">${esc(c.id)}</span>${esc(c.name||'')}</b>
+        <span class="tag">${esc(c.role||'')}</span></div>
+      <div style="margin-top:7px;font-size:13px"><b>外觀 appearance_en（逐字不可改）：</b><br>
+        <span style="color:var(--mut)">${esc(c.appearance_en||'')}</span></div>
+      <div class="hint" style="margin:6px 0">性格：${esc(c.personality||'')}　語氣：${esc(c.voice||'')}</div>
+      <div style="font-size:12px"><b>定裝照提示詞：</b></div>
+      <pre style="max-height:none">${esc(c.ref_prompt||'')}</pre>
+      <button class="ghost sm" data-cp="${esc(c.appearance_en||'')}">複製外觀描述</button>
+    </div>`).join('')||'<div class="empty">未辨識到角色</div>';
+  $('#chars').onclick=e=>{const b=e.target.closest('[data-cp]');
+    if(b){navigator.clipboard.writeText(b.dataset.cp);toast('已複製');}};
+
+  $('#scenes').innerHTML=(d.scenes||[]).map(s=>`
+    <div style="border:1px solid var(--line);border-radius:8px;padding:11px;margin-bottom:8px">
+      <b><span class="tag SC">${esc(s.id)}</span>${esc(s.name||'')}</b>
+      <div style="margin-top:6px;font-size:13px;color:var(--mut)">${esc(s.description_en||'')}</div>
+      <pre style="max-height:none;margin-top:7px">${esc(s.ref_prompt||'')}</pre></div>`).join('')
+    ||'<div class="empty">未辨識到場景</div>';
+
+  $('#shotN').textContent=`（${d.shots.length} 顆）`;
+  $('#tBody').innerHTML=d.shots.map(s=>`<tr>
+    <td><span class="tag SH">${esc(s.id)}</span></td>
+    <td>${s.page||''}</td><td>${esc(s.duration||'')}</td>
+    <td style="font-size:12px">${esc(s.shot_size||'')}</td>
+    <td style="font-size:12px">${esc(s.camera||'')}</td>
+    <td style="font-size:12px">${esc(s.action||'')}
+      ${s.dialogue?`<div style="color:var(--acc);margin-top:4px">「${esc(s.dialogue)}」</div>`:''}
+      ${s.sfx?`<div style="color:var(--acc2);margin-top:2px">♪ ${esc(s.sfx)}</div>`:''}</td>
+    <td><pre style="max-height:150px;font-size:11px;margin:0">${esc(s.prompt||'')}</pre>
+      <button class="ghost sm" data-scp="${esc(s.id)}">複製</button>
+      <button class="ghost sm" data-fix="${esc(s.id)}">⚠ 修復</button></td>
+    <td id="rv-${esc(s.id)}" data-sid="${esc(s.id)}"></td></tr>`).join('');
+}
+
+$('#tBody').onclick=e=>{
+  const c=e.target.closest('[data-scp]');
+  if(c){const s=DATA.shots.find(x=>x.id===c.dataset.scp);
+    navigator.clipboard.writeText(s.prompt);toast('已複製 '+s.id);return;}
+  const r=e.target.closest('[data-fix]');
+  if(r){const s=DATA.shots.find(x=>x.id===r.dataset.fix);
+    $('#f_prompt').value=s.prompt||'';
+    $('#f_shot').value=s.id||'';
+    const cid=(s.character_ids||[])[0];
+    const c=DATA.characters.find(x=>x.id===cid);
+    $('#f_chars').value=c?c.appearance_en||'':'';
+    $('#f_img').value='';
+    $('#fxOut').classList.add('hidden');
+    $$('.tab')[2].click();
+    toast('已帶入 '+s.id+'，描述你發現的問題後修復');}
+};
+
+$('#cpBible').onclick=()=>{
+  navigator.clipboard.writeText($('#bibleTxt').textContent);toast('已複製美術基準全文');};
+$('#dlBible').onclick=()=>{
+  const t=DATA.title||'storyboard';
+  const blob=new Blob([$('#bibleTxt').textContent],{type:'text/markdown'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);a.download=`art_bible_${t}.md`;a.click();
+  toast('已下載');};
+
+$('#copyAll').onclick=()=>{
+  const t=DATA.shots.map(s=>`# ${s.id} (${s.duration})\n${s.prompt}\n\nNEGATIVE: ${s.negative_prompt||''}`).join('\n\n---\n\n');
+  navigator.clipboard.writeText(t);toast(`已複製 ${DATA.shots.length} 筆`);};
+
+setupDrop($('#drop2'),$('#file2'),fs=>{$('#file2').files=fs;
+  if(fs[0]){$('#prev2').src=URL.createObjectURL(fs[0]);$('#prev2').classList.remove('hidden');}});
+
+$('#rv').onclick=async()=>{
+  const f=$('#file2').files[0];
+  if(!f)return toast('請先上傳分鏡圖');
+  if(!$('#tp').value.trim())return toast('請貼上目標提示詞');
+  const fd=new FormData();fd.append('image',f);
+  fd.append('target_prompt',$('#tp').value);
+  fd.append('characters',$('#cc').value);fd.append('extra',$('#ex').value);
+  const _t0=Date.now();
+  $('#rv').disabled=true;$('#rv').textContent='審查中…';
+  const _tm=setInterval(()=>{$('#rvTime').textContent=
+    '已等待 '+((Date.now()-_t0)/1000).toFixed(0)+' 秒';},1000);
+  try{
+    const r=await fetch('/api/review',{method:'POST',body:fd});
+    const j=await r.json();
+    if(!r.ok)throw new Error(j.detail||'失敗');
+    showRev(j);
+  }catch(e){toast('錯誤：'+e.message);}
+  clearInterval(_tm);
+  $('#rvTime').textContent='耗時 '+((Date.now()-_t0)/1000).toFixed(1)+' 秒';
+  $('#rv').disabled=false;$('#rv').textContent='開始審查';
+};
+
+function showRev(j){
+  $('#rvOut').classList.remove('hidden');
+  const ok=j.verdict==='PASS';
+  $('#sc').textContent=j.score??'—';$('#sc').className='score '+(ok?'PASS':'NEEDS_FIX');
+  $('#vd').textContent=ok?'PASS 可用':'NEEDS_FIX 需修正';$('#vd').className='pill '+(ok?'PASS':'NEEDS_FIX');
+  $('#nIss').textContent=`發現 ${(j.issues||[]).length} 項問題`;
+  if(j._enforced){const w=document.createElement('div');
+    w.style.cssText='font-size:12px;margin-top:8px;padding:7px 10px;border-radius:6px;'+
+      'background:rgba(224,85,99,.12);border:1px solid rgba(224,85,99,.4);color:#f0a0a8';
+    w.innerHTML='⚠ <b>已由規則層修正</b>：'+(j._notes||[]).join('；')+
+      '<br><span style="opacity:.75">此結論非模型原始輸出，請以人眼為準。</span>';
+    $('#nIss').parentElement.appendChild(w);}
+  $('#obsTxt').textContent=j.observation||'(無)';
+  $('#issues').innerHTML=(j.issues||[]).map(i=>`
+    <div style="border-left:3px solid ${i.severity==='BLOCKER'?'var(--bad)':'var(--acc2)'};
+                background:var(--panel2);padding:9px 12px;border-radius:0 7px 7px 0;margin-bottom:8px">
+      <div class="row" style="gap:7px;margin-bottom:4px">
+        <span class="${i.severity==='BLOCKER'?'blk':'min'}">${i.severity}</span>
+        <span class="tag">${esc(i.category||'')}</span></div>
+      <div style="font-size:13px"><b>觀察：</b>${esc(i.observation||'')}</div>
+      <div style="font-size:13px;color:var(--mut);margin-top:3px"><b>修正：</b>${esc(i.fix||'')}</div>
+    </div>`).join('')||'<div class="empty">無明顯問題</div>';
+  $('#rw').textContent=j.rewritten_prompt||'';
+  $('#np').textContent=j.negative_prompt||'';
+  $('#raw').textContent=j.raw||JSON.stringify(j,null,2);
+  $('#rvOut').scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+$('#cp1').onclick=()=>{navigator.clipboard.writeText($('#rw').textContent);toast('已複製')};
+$('#cp2').onclick=()=>{navigator.clipboard.writeText($('#np').textContent);toast('已複製')};
+
+/* ══════════ 匯出 & 專案管理 ══════════ */
+['exMd','exCsv','exJson'].forEach(id=>{
+  const fmt={exMd:'md',exCsv:'csv',exJson:'json'}[id];
+  $('#'+id).onclick=()=>{
+    if(!PROJ)return toast('尚未產生專案');
+    location.href=`/api/export/${PROJ}?fmt=${fmt}`;
+  };
+});
+
+async function loadProjects(){
+  try{
+    const j=await (await fetch('/api/projects')).json();
+    const list=j.projects||[];
+    if(!list.length){$('#histCard').style.display='none';return;}
+    $('#histCard').style.display='';
+    $('#histList').innerHTML=`<div class="row">`+list.map(p=>
+      `<div data-pid="${p.id}" style="border:1px solid var(--line);border-radius:8px;
+            padding:9px 13px;cursor:pointer;min-width:180px">
+        <b style="font-size:13px">${esc(p.title)}</b>
+        <div class="hint">${p.shots} 鏡頭 · ${p.characters} 角色 · ${p.page_count} 頁</div>
+        <div class="hint">${new Date(p.done_at*1000).toLocaleString('zh-TW')}</div>
+      </div>`).join('')+`</div>`;
+    $('#histList').onclick=e=>{
+      const d=e.target.closest('[data-pid]');if(!d)return;
+      openProject(d.dataset.pid);
+    };
+  }catch(e){}
+}
+
+$('#histToggle').onclick=()=>{
+  const box=$('#histList');
+  const hide=box.style.display!=='none';
+  box.style.display=hide?'none':'';
+  $('#histToggle').textContent=hide?'展開':'收合';
+};
+
+async function openProject(pid){
+  try{
+    toast('載入中…');
+    const d=await (await fetch('/api/project/'+pid)).json();
+    PROJ=pid;DATA=d;render(d);
+    $('#pidShow').textContent=pid;
+    document.querySelector('#out').scrollIntoView({behavior:'smooth'});
+    toast('已載入「'+d.title+'」');
+  }catch(e){toast('載入失敗：'+e.message);}
+}
+
+function pollDone(pid){
+  const b=$('#pidShow');if(b)b.textContent=pid;
+  loadProjects();
+}
+
+/* ══════════ TAB C：修復 ══════════ */
+const QUICK=['手變成六根手指','角色每格長得都不一樣','角色服裝變了','背景多出不該有的東西',
+             '構圖不對，主體太小','有殘留文字或浮水印','動作很怪／扭曲','光線太平沒有立體感',
+             '畫風跟其他格不一致','角色臉不像'];
+QUICK.forEach(q=>{const b=document.createElement('button');
+  b.className='ghost sm';b.textContent=q;
+  b.onclick=()=>{$('#f_sym').value=($('#f_sym').value?q
+    :($('#f_sym').value?q+'；':'')+q);};$('#quick').appendChild(b);});
+
+$('#fxBtn').onclick=async()=>{
+  const p=$('#f_prompt').value.trim(), sy=$('#f_sym').value.trim();
+  if(!p)return toast('請貼上提示詞');
+  if(!sy)return toast('請描述你發現的問題');
+  const fd=new FormData();
+  fd.append('prompt',p);fd.append('symptom',sy);
+  fd.append('characters',$('#f_chars').value);
+  fd.append('shot_id',$('#f_shot').value);
+  const f=$('#f_img').files[0];if(f)fd.append('image',f);
+  $('#fxBtn').disabled=true;$('#fxBtn').textContent='診斷中…';
+  $('#fxHint').textContent='正在分析根因並比對歷史記錄…';
+  try{
+    const r=await fetch('/api/repair',{method:'POST',body:fd});
+    const j=await r.json();
+    if(!r.ok)throw new Error(j.detail||'失敗');
+    showFix(j);refreshMem();
+  }catch(e){toast('錯誤：'+e.message);}
+  $('#fxBtn').disabled=false;$('#fxBtn').textContent='診斷並修復';
+};
+
+let FIXED=null;
+function showFix(j){
+  FIXED=j;
+  $('#fxOut').classList.remove('hidden');
+  const pc=j.primary_cause||{};
+  $('#fxCat').textContent=pc.category||'—';
+  $('#fxRule').innerHTML=(j.matched_rule&&j.matched_rule!=='null'
+    ?'命中規則：<b>'+esc(j.matched_rule)+'</b>':'模型自主判斷')
+    +(j._fallback?'　<span class="blk">（模型失敗，規則庫接手）</span>':'')
+    +(j._rule_applied?'　<span style="color:var(--ok)">（已套用規則庫補強）</span>':'');
+  $('#fxWhy').textContent=pc.explanation||'';
+  $('#fxEv').textContent=pc.evidence||'';
+  $('#fxChg').innerHTML=(j.changes||[]).map((c,i)=>
+    `<div style="border-left:3px solid var(--acc);background:var(--panel2);
+      padding:8px 12px;border-radius:0 7px 7px 0;margin-bottom:7px;font-size:13px">
+      <b style="color:var(--acc)">${i+1}.</b> ${esc(c)}</div>`).join('');
+  $('#fxNew').textContent=j.rewritten_prompt||'';
+  $('#fxNeg').textContent=j.negative_prompt||'';
+  $('#fxRisk').textContent=j.residual_risk||'—';
+  $('#fxPrev').textContent=j.prevention||'—';
+  $('#fxOut').scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+$('#fxCp').onclick=()=>{navigator.clipboard.writeText($('#fxNew').textContent);toast('已複製')};
+$('#fxNp').onclick=()=>{navigator.clipboard.writeText($('#fxNeg').textContent);toast('已複製')};
+$('#fxBack').onclick=()=>{
+  if(!FIXED)return;const sid=$('#f_shot').value;
+  if(!sid||!DATA)return toast('請先從分鏡表點「⚠ 修復」進入');
+  const s=DATA.shots.find(x=>x.id===sid);
+  if(!s)return toast('找不到該鏡頭');
+  s.prompt=FIXED.rewritten_prompt;s.negative_prompt=FIXED.negative_prompt;
+  const cell=document.querySelector(`[data-sid="${sid}"]`);
+  if(cell)cell.innerHTML='<span class="tag SH">已修補</span>';
+  toast('已套回 '+sid);};
+$('#fxAgain').onclick=()=>{
+  if(!FIXED)return;$('#f_prompt').value=FIXED.rewritten_prompt;
+  $('#fxOut').classList.add('hidden');toast('已帶入新提示詞，可再次診斷');};
+
+/* ══════════ TAB D：記憶 ══════════ */
+async function refreshMem(){
+  try{
+    const j=await (await fetch('/api/memory')).json();
+    $('#mTotal').textContent=j.total_repairs;
+    $('#mKeys').textContent=j.distinct_prompts;
+    $('#mLes').textContent=j.lessons.length;
+    $('#mLessons').innerHTML=j.lessons.length?j.lessons.map(l=>
+      `<div style="border:1px solid var(--line);border-radius:8px;padding:11px;margin-bottom:8px">
+        <div class="row" style="justify-content:space-between;margin-bottom:5px">
+          <b style="font-size:13px">${esc(l.symptom)}</b>
+          <span class="tag SH">${l.times} 次</span></div>
+        <div class="hint">根因：${esc((l.causes||[]).join('、')||'—')}</div>
+        <div style="font-size:12.5px;color:var(--mut);margin-top:4px">
+          有效修法：${esc((l.fixes||[]).join('；')||'—')}</div></div>`).join('')
+      :'<div class="empty">尚無規律，去「問題修復」累積幾次</div>';
+    $('#mRecent').innerHTML=(j.recent||[]).length?j.recent.map(r=>
+      `<details style="border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:7px">
+        <summary style="cursor:pointer;font-size:13px">
+          <span class="tag SH">${esc(r.shot_id||'—')}</span>
+          ${esc((r.symptom||'').slice(0,50))}
+          ${r.hits>1?`<span class="tag">已修 ${r.hits} 次</span>`:''}</summary>
+        <div class="hint" style="margin-top:8px">${esc(r.explanation||'')}</div>
+        <pre style="max-height:160px;font-size:11px">${esc(r.rewritten_prompt||'')}</pre></details>`).join('')
+      :'<div class="empty">尚無修正記錄</div>';
+    $('#mRules').innerHTML=(j.cause_rules||[]).map(r=>
+      `<div style="border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:7px">
+        <div class="row" style="gap:8px;margin-bottom:5px">
+          <span class="tag SC">${esc(r.id)}</span>
+          ${(r.trigger||[]).slice(0,6).map(t=>`<span class="tag">${esc(t)}</span>`).join('')}</div>
+        <div class="hint" style="color:var(--mut)">${esc(r.cause||'')}</div></div>`).join('');
+    if(j.total_repairs>0&&DATA){
+      const b=$('#memBadge');b.style.display='';
+      b.textContent=`🧠 記憶庫 ${j.total_repairs} 次修正`;
+    }
+  }catch(e){}
+}
+$('#memRefresh').onclick=refreshMem;
+$('#memClear').onclick=async()=>{
+  if(!confirm('確定清空所有修正記錄？此操作無法復原。'))return;
+  await fetch('/api/memory',{method:'DELETE'});refreshMem();toast('已清空');};
+
+$$('.tab').forEach(b=>{const o=b.onclick;b.onclick=()=>{o&&o();
+  if(b.dataset.t==='d')refreshMem();}});
+
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+</script>
+</body>
+</html>
