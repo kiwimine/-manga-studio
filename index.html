@@ -161,6 +161,41 @@ tr:hover td{background:#1a1f2b}
         <div class="hint">這份是導演視角的整片基準，不是逐格複述。生圖前先看這份，全片風格才不會散掉。</div>
         <pre id="bibleTxt" style="max-height:560px"></pre>
       </div>
+      <div class="card" id="sheetCard" style="display:none">
+        <div class="row" style="justify-content:space-between;align-items:flex-start;
+                    gap:12px;margin-bottom:4px">
+          <h2 style="margin:0;min-width:0;flex:1 1 auto;overflow-wrap:anywhere">
+            🖼 整張視覺分鏡版
+            <span class="hint" style="display:inline;font-weight:400">（一張圖排滿所有鏡頭）</span>
+          </h2>
+          <div class="row" style="flex:0 0 auto">
+            <select id="sheetAspect" style="background:#0c0e14;border:1px solid var(--line);
+                    border-radius:6px;padding:5px 8px;color:var(--fg);font-size:12px">
+              <option value="3:2">3:2　2528×1696</option>
+              <option value="16:9">16:9　2752×1536</option>
+              <option value="4:3">4:3　2400×1792</option>
+              <option value="1:1">1:1　2048×2048</option>
+              <option value="3:4">3:4　1792×2400</option>
+              <option value="9:16">9:16　1536×2752</option>
+            </select>
+            <button class="ghost sm" id="sheetRegen">重新生成</button>
+            <button class="ghost sm" id="sheetCopy">複製</button>
+          </div>
+        </div>
+        <div class="hint">
+          給 <b>Qwen-Image-2.1</b> 用：一次生成多格分鏡排版圖。
+          格數超過 8 格版面會崩，建議先跑 8 格以内的版本。
+        </div>
+        <div id="sheetMeta" class="hint" style="margin:8px 0"></div>
+        <h3 style="font-size:13px;margin:12px 0 6px">PROMPT（餵給 Qwen-Image-2.1）</h3>
+        <pre id="sheetPrompt"></pre>
+        <div class="two" style="margin-top:12px">
+          <div><h3 style="font-size:13px;margin:0 0 6px">NEGATIVE</h3>
+            <pre id="sheetNeg" style="max-height:180px"></pre></div>
+          <div><h3 style="font-size:13px;margin:0 0 6px">NOTES 排版說明</h3>
+            <pre id="sheetNotes" style="max-height:180px"></pre></div>
+        </div>
+      </div>
       <div class="card">
         <h2>🎭 角色設定檔 <span class="hint" style="display:inline">（一致性關鍵，之後每格提示詞都會逐字引用）</span></h2>
         <div id="chars"></div>
@@ -465,6 +500,22 @@ function render(d){
     $('#bibleCard').style.display='none';
   }
 
+  // 整張分鏡版
+  const sh=d.sheet;
+  if(sh){
+    $('#sheetCard').style.display='';
+    $('#sheetPrompt').textContent=sh.prompt||'';
+    $('#sheetNeg').textContent=sh.negative||'';
+    $('#sheetNotes').textContent=sh.notes||'';
+    $('#sheetMeta').innerHTML=
+      `格數 <b>${sh.panel_count||0}</b>　比例 <b>${esc(sh.aspect||'')}</b>`+
+      (sh.size?`　建議尺寸 <b>${esc(sh.size)}</b>`:'')+
+      (sh.panel_count>8?'　<span style="color:var(--bad)">⚠ 超過 8 格，版面可能崩壞，建議分兩批生成</span>':'');
+    if(sh.aspect)$('#sheetAspect').value=sh.aspect;
+  }else{
+    $('#sheetCard').style.display='none';
+  }
+
   $('#chars').innerHTML=(d.characters||[]).map(c=>`
     <div style="border:1px solid var(--line);border-radius:8px;padding:12px;margin-bottom:9px">
       <div class="row" style="justify-content:space-between">
@@ -518,6 +569,27 @@ $('#tBody').onclick=e=>{
     $$('.tab')[2].click();
     toast('已帶入 '+s.id+'，描述你發現的問題後修復');}
 };
+
+$('#sheetCopy').onclick=()=>{
+  const t=$('#sheetPrompt').textContent;
+  const n=$('#sheetNeg').textContent;
+  navigator.clipboard.writeText(n?t+'\n\nNEGATIVE: '+n:t);
+  toast('已複製分鏡版提示詞');};
+
+$('#sheetRegen').onclick=async()=>{
+  if(!PROJ)return toast('尚未產生專案');
+  const btn=$('#sheetRegen');
+  btn.disabled=true;btn.textContent='生成中…';
+  const fd=new FormData();
+  fd.append('pid',PROJ);fd.append('aspect',$('#sheetAspect').value);
+  try{
+    const r=await fetch('/api/sheet',{method:'POST',body:fd});
+    const j=await r.json();
+    if(!r.ok)throw new Error(j.detail||'失敗');
+    if(DATA){DATA.sheet=j;render(DATA);}
+    toast('已重新生成（'+j.aspect+'　'+(j.size||'')+'）');
+  }catch(e){toast('錯誤：'+e.message);}
+  btn.disabled=false;btn.textContent='重新生成';};
 
 $('#cpBible').onclick=()=>{
   navigator.clipboard.writeText($('#bibleTxt').textContent);toast('已複製美術基準全文');};

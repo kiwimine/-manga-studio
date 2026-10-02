@@ -719,6 +719,16 @@ def run_analysis(pid: str, pages: list):
             print(f"[{pid}] 美術基準生成失敗（不影響主流程）：{e}", flush=True)
             result["art_bible"] = None
 
+        # ── 生成整張視覺分鏡版提示詞 ──
+        try:
+            print(f"[{pid}] 生成整張分鏡版提示詞…", flush=True)
+            result["sheet"] = build_sheet_prompt(result)
+            print(f"[{pid}] 分鏡版提示詞完成（{len(result['sheet']['prompt'])} 字）",
+                  flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"[{pid}] 分鏡版提示詞失敗（不影響主流程）：{e}", flush=True)
+            result["sheet"] = None
+
         with LOCK:
             STORE[pid]["result"] = result
             STORE[pid]["status"] = "done"
@@ -883,6 +893,31 @@ def _enforce_verdict(res: dict) -> dict:
     if res["verdict"] == "PASS" and sc < 50:
         res["score"] = 50
     return res
+
+
+@app.post("/api/sheet")
+async def api_sheet(pid: str = Form(...), aspect: str = Form("3:2")):
+    """重新產生整張視覺分鏡版的提示詞。"""
+    with LOCK:
+        if pid not in STORE or not STORE[pid].get("result"):
+            raise HTTPException(status_code=404, detail="專案不存在")
+        d = dict(STORE[pid]["result"])
+    if aspect not in SHEET_SIZES:
+        raise HTTPException(status_code=400,
+                            detail=f"比例只支援 {', '.join(SHEET_SIZES)}")
+    try:
+        out = build_sheet_prompt(d, aspect)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"生成失敗：{e}")
+
+    w, h = SHEET_SIZES[aspect]
+    out["size"] = f"{w}×{h}"
+    with LOCK:
+        STORE[pid]["result"]["sheet"] = out
+    persist_project(pid, STORE[pid]["result"])
+    return out
 
 
 @app.get("/api/projects")
@@ -1065,6 +1100,112 @@ def enforce_sequence(shots: list, characters: list, scenes: list) -> list:
         sh["id"] = f"SH{i:02d}"
 
     return merged
+
+
+PROMPT_SHEET = """你是一位電影分鏡版（storyboard sheet）繪製者。
+
+我要你為以下鏡頭序列產生**一張完整分鏡版圖**的生圖提示詞。
+
+這張圖會是：多格分鏡排版在一張畫布上，用於視覺總覽與後續影片生成的參考圖。
+
+【已知資料】
+本話：{title}
+梗概：{logline}
+畫風：{style}
+總時長：{duration}
+
+【角色（外觀必須逐字沿用，不可改寫）】
+{characters}
+
+【場景】
+{scenes}
+
+【鏡頭序列】
+{shots}
+
+【任務】
+產出一個英文提示詞，要點是**單張圖內的多格分鏡排版**，不是單一場景。
+
+必須包含：
+
+1. **開頭指定媒體**：例如 "A professional film storyboard sheet, hand-drawn production sketches"
+2. **分格數量與排列**：依鏡頭數決定（例如 "6 panels arranged in a 2×3 grid"）
+3. **每格內容**：依序描述每一格畫什麼（景別、角色、動作、背景）
+   - 逐格用編號標示（1, 2, 3...）與簡短標籤（例如 "CU - face"、"WS - classroom"）
+4. **每格的鏡頭運動標註**：用箭頭或文字標示推、搖、跟
+5. **角色外觀**：第一格出現角色時完整描述，後續格子沿用相同特徵
+6. **風格**：全片統一的線稿與上色風格
+7. **負面提示詞**：避免現代感、避免照片感、避免多餘人物
+
+【排版要求】
+- 白底或淺灰底的專業分鏡版風格
+- 格子之間有細線分隔
+- 每格下方或角落有編號與景別標籤
+- 不要加對白文字框（那是後期的事）
+- 整體像專業動畫製作的 storyboard sheet
+
+【重要的實務提醒】
+- 格數不要超過 8 格，超過 Qwen-Image 會排不下、每格細節會崩壞
+- 每格的描述要精簡（20-30 字），不是完整劇本
+- 提示詞總長控制在 400 字以內，超長會讓版面失控
+
+【輸出格式】
+只輸出以下三段，不要解釋：
+
+PROMPT:
+<英文提示詞>
+
+NEGATIVE:
+<負面提示詞>
+
+NOTES:
+<中文說明：為何這樣排版、每格對應哪個鏡頭、生成後可能的問題>"""
+
+
+def build_sheet_prompt(d: dict, aspect: str = "3:2") -> dict:
+    """產生整張視覺分鏡版的提示詞。"""
+    chars = "\n".join(
+        f"- {c.get('id')} {c.get('name','')}：{c.get('appearance_en','')}"
+        for c in d.get("characters", [])) or "（無）"
+    scenes = "\n".join(
+        f"- {sc.get('id')} {sc.get('name','')}：{sc.get('description_en','')}"
+        for sc in d.get("scenes", [])) or "（無）"
+    shots = "\n".join(
+        f"- {sh.get('id')}｜{sh.get('duration','')}｜{sh.get('shot_size','')}｜"
+        f"{sh.get('camera','')}｜情緒：{sh.get('mood','')}\n"
+        f"  動作：{sh.get('action','')}"
+        + (f"\n  對白：「{sh['dialogue']}」" if sh.get("dialogue") else "")
+        for sh in d.get("shots", []))
+
+    prompt = PROMPT_SHEET.format(
+        title=d.get("title") or "Untitled",
+        logline=d.get("logline") or "-",
+        style=d.get("global_style") or "clean lineart",
+        duration=d.get("estimated_duration") or "-",
+        characters=chars, scenes=scenes, shots=shots or "-")
+
+    txt = chat([{"role": "user", "content": prompt}],
+               temperature=0.35, max_tokens=2500)
+
+    def grab(tag: str) -> str:
+        m = re.search(rf"{tag}:\s*(.+?)(?=\n\s*(?:PROMPT|NEGATIVE|NOTES)\s*:|\Z)",
+                      txt, re.S | re.I)
+        return m.group(1).strip() if m else ""
+
+    return {
+        "prompt": grab("PROMPT") or txt.strip()[:800],
+        "negative": grab("NEGATIVE"),
+        "notes": grab("NOTES"),
+        "aspect": aspect,
+        "panel_count": len(d.get("shots", [])),
+        "raw": txt,
+    }
+
+
+SHEET_SIZES = {
+    "3:2": (2528, 1696), "16:9": (2752, 1536), "4:3": (2400, 1792),
+    "1:1": (2048, 2048), "9:16": (1536, 2752), "3:4": (1792, 2400),
+}
 
 
 def build_art_bible(d: dict) -> str:
