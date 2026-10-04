@@ -33,23 +33,34 @@ Base URL：`http://<host>:8090`
 {
   "title": "...", "logline": "...", "estimated_duration": "...",
   "global_style": "...",
-  "characters": [{"id","name","role","appearance_en","personality","ref_prompt"}],
+  "characters": [{"id":"女1","slot":"女1","gender":"female","first_page":1,"count":8}],
+  "elements": [{"id":"e1","name":"飛鳥","description_en":"..."}],
   "scenes": [{"id","name","description_en"}],
   "shots": [{"id","page","duration","shot_size","camera",
-             "character_ids","scene_id","action","expression",
+             "character_ids","element_ids","action","expression",
              "lighting","mood","dialogue","sfx",
              "prompt","negative_prompt","video_prompt"}],
   "negative_prompt": "...",
   "art_bible": "## 1. 全域美術基準\n...",
+  "appearance_leaks": null,
   "page_count": 5
 }
 ```
 
+> **v0.3.0 變更**：`characters` 是**角色位**，不含 `appearance_en`／`ref_prompt`／`name`。
+> 欄位含 `appearance_en` 者為 v0.2 舊格式，載入時自動遷移。
+>
+> `appearance_leaks` 非 `null` 表示偵測到鏡頭提示詞仍描述角色外觀，
+> 需用 `/api/repair` 重寫。系統不自動清洗（見 [CAST_SLOTS §9.2](CAST_SLOTS.md)）。
+
 ### GET `/api/projects`
 
 ```json
-{"projects": [{"id","title","page_count","shots","characters","done_at"}]}
+{"projects": [{"id","title","page_count","shots","characters","migrated","done_at"}]}
 ```
+
+> `characters` 為角色位數量。`migrated: true` 表示此專案由 v0.2 舊格式遷移而來，
+> 鏡頭提示詞可能仍含外觀描述（詳見 `_migration_note`）。
 
 ### GET `/api/export/{pid}?fmt=md|csv|json`
 
@@ -128,7 +139,7 @@ Base URL：`http://<host>:8090`
 
 系統會依這些詞比對規則庫：
 
-- `R-CHAR-DRIFT` — 每格長得都不一樣、服裝變了、臉不像
+- `R-CHAR-DRIFT` — **角色外觀由參考圖負責**，此架構下的「角色走樣」通常是參考圖未對應到正確的角色位。修法不是補外觀描述，而是檢查 `character_ids` 與參考圖的對應。其他觸發詞（臉不像、服裝變了）仍可命中。
 - `R-SEED-DRIFT` — 畫風跟其他格不一致、風格不統一
 - `R-HAND-DEFECT` — 手變成六根手指、手部畫錯
 - `R-COMPOSITION` — 主體太小、出框、構圖不對

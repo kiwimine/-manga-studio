@@ -90,12 +90,90 @@ def persist_project(pid: str, result: dict):
         print(f"[{pid}] 存檔失敗（不影響使用）：{e}", flush=True)
 
 
+def detect_appearance_leaks(shots: list) -> list:
+    """偵測鏡頭中殘留的外觀描述，回傳 [(shot_id, 命中詞)]。
+
+    這是**報告工具**，不是清洗工具（PITFALLS 第二條）。
+    只挑選歧義性低的外觀詞彙，避免把敘事用法誤判：
+      'eye'  → 放行（close-up of the eyes 是敘事）
+      'hair' → 攔截（hair 在此架構下必為外觀）
+    """
+    # 這些詞在本架構下幾乎只可能指外觀
+    HARD = ("hair", "haircut", "hairstyle", "blonde", "eyebrow", "eyelash",
+            "freckles", "wearing", "outfit", "uniform", "dress", "jacket",
+            "glasses", "ribbon", "ponytail", "beard", "mustache")
+    out = []
+    for sh in shots or []:
+        for field in ("prompt", "action", "expression", "video_prompt"):
+            text = str(sh.get(field, "")).lower()
+            for w in HARD:
+                if w in text:
+                    out.append((sh.get("id", "?"), f"{field}:{w}"))
+    return out
+
+
+def migrate_legacy_project(pid: str, data: dict) -> dict:
+    """把舊格式專案（角色帶 appearance_en）轉成角色位架構。
+
+    docs/CAST_SLOTS.md §8：原檔保留不動，另存 <pid>.legacy.json 供對照。
+    只轉換角色相關欄位，鏡頭與場景原樣保留。
+    """
+    chars = data.get("characters") or []
+    # 已是新格式：有 slot 或 gender 欄位且無 appearance_en
+    if not any(c.get("appearance_en") for c in chars if isinstance(c, dict)):
+        return data
+
+    legacy_path = os.path.join(PROJECTS_DIR, f"{pid}.legacy.json")
+    try:
+        if not os.path.exists(legacy_path):
+            with open(legacy_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=1)
+    except Exception as e:  # noqa: BLE001
+        print(f"[{pid}] 舊格式備份失敗（不影響轉換）：{e}", flush=True)
+
+    info = migrate_legacy_cast(chars)
+    reg = CastRegistry()
+    new_slots = []
+    for c in info:
+        # admit() 會把 gender 正規化為 female/male/crowd
+        new_slots.append(reg.admit([{"id": c["id"] or f"c{len(new_slots)+1}",
+                                    "gender": c["gender"]}], 1)[-1])
+
+    # 重算每個角色位的出場次數
+    counts = {}
+    for sh in data.get("shots", []):
+        for cid in sh.get("character_ids", []) or []:
+            slot = reg._by_key.get(str(cid), str(cid))
+            counts[slot] = counts.get(slot, 0) + 1
+    for s in new_slots:
+        s["count"] = counts.get(s["id"], 0)
+
+    data["characters"] = new_slots
+    data.setdefault("elements", [])
+    # 舊 shot 的 character_ids 也一併對映
+    reg.remap_shot_cast(data.get("shots", []))
+    for sh in data.get("shots", []):
+        sh.setdefault("element_ids", [])
+        # 舊 prompt 內嵌外觀描述，原文保留供對照，實際使用留白版本
+        if sh.get("prompt") and "_prompt_legacy" not in sh:
+            sh["_prompt_legacy"] = sh["prompt"]
+    data["_migrated_from"] = "v0.2 legacy cast format"
+    data["_migration_note"] = (
+        "舊資料的 shot.prompt 內嵌角色外觀描述，已保留於 _prompt_legacy。"
+        "使用前需改用無外觀描述的新提示詞（執行 /api/repair 或重新產生分鏡）。"
+    )
+    print(f"[{pid}] 已從舊格式遷移為角色位架構："
+          f"{[s['id'] for s in new_slots]}（舊 prompt 已保留於 _prompt_legacy）",
+          flush=True)
+    return data
+
+
 def load_projects():
     """啟動時載入磁碟上的專案，恢復清單。"""
     global PROJECT_INDEX
     try:
         for fn in os.listdir(PROJECTS_DIR):
-            if not fn.endswith(".json"):
+            if not fn.endswith(".json") or fn.endswith(".legacy.json"):
                 continue
             pid = fn[:-5]
             try:
@@ -103,6 +181,7 @@ def load_projects():
                     data = json.load(f)
             except Exception:  # noqa: BLE001
                 continue
+            data = migrate_legacy_project(pid, data)
             mtime = os.path.getmtime(os.path.join(PROJECTS_DIR, fn))
             STORE[pid] = {"status": "done", "progress": "done",
                           "error": None, "result": data,
@@ -112,6 +191,7 @@ def load_projects():
                 "page_count": data.get("page_count", 0),
                 "shots": len(data.get("shots", [])),
                 "characters": len(data.get("characters", [])),
+                "migrated": bool(data.get("_migrated_from")),
                 "done_at": int(mtime),
             }
         if PROJECT_INDEX:
@@ -267,6 +347,150 @@ def chat(messages, temperature=0.4, max_tokens=MAX_TOKENS, retries=2,
     raise HTTPException(status_code=502, detail=f"模型呼叫失敗：{last_err}")
 
 
+# ─────────────────── 角色位分配器（Cast Slot Allocator）───────────────────
+#
+# 設計文件：docs/CAST_SLOTS.md
+#
+# 為什麼需要程式層約束（PITFALLS 第十條）：
+#   20 頁分 4 批處理，第 4 批的 prompt 會帶入前 3 批累積的角色位。
+#   光靠「餵前一批結果給模型看」不能保證編號穩定——模型看到新的女性角色
+#   可能自行發明一個 id，與第 1 批的「女1」衝突。
+#   所以編號由這裡決定，模型只負責標註性別與首次出場。
+#
+# 角色位不描述外觀：外觀由後期 MiniMax H3 的 reference 圖負責。
+# ─────────────────────────────────────────────────────────────────
+
+_SLOT_FEMALE = "female"
+_SLOT_MALE = "male"
+_SLOT_CROWD = "crowd"
+
+
+def _norm_gender(g: str) -> str:
+    """把模型輸出的性別標註正規化為三類。"""
+    t = str(g or "").strip().lower()
+    if t in ("female", "f", "女", "女性", "girl", "woman"):
+        return _SLOT_FEMALE
+    if t in ("male", "m", "男", "男性", "boy", "man"):
+        return _SLOT_MALE
+    return _SLOT_CROWD
+
+
+class CastRegistry:
+    """跨批次維持角色位編號穩定。
+
+    編號規則（docs/CAST_SLOTS.md §4.2）：
+      1. 依首次出場順序分配，不由模型決定最終 id
+      2. 性別分類由程式層正規化
+      3. 新角色接續既有最大序號，不重複編號
+      4. 未指定性別者 → 路人，共用計數器
+    """
+
+    def __init__(self):
+        self.slots: list = []          # 正式角色位，維持首次出場順序
+        self._by_key: dict = {}        # (batch_local_id) -> slot
+        self._n_female = 0
+        self._n_male = 0
+        self._n_crowd = 0
+
+    def _next_slot(self, gender: str) -> str:
+        if gender == _SLOT_FEMALE:
+            self._n_female += 1
+            return f"女{self._n_female}"
+        if gender == _SLOT_MALE:
+            self._n_male += 1
+            return f"男{self._n_male}"
+        self._n_crowd += 1
+        return f"路人{self._n_crowd}" if self._n_crowd > 1 else "路人"
+
+    def _slot_of(self, sid: str) -> dict:
+        for s in self.slots:
+            if s["id"] == sid:
+                return s
+        return {}
+
+    def admit(self, chars: list, page: int) -> list:
+        """把某一批模型輸出的角色對映到角色位，回傳正式角色位清單。
+
+        對映判準：性別相符 + 首次出場順序最接近 → 視為同一人。
+        模型若在後續批次沿用先前的暫用 id，直接命中既有角色位。
+        """
+        for c in chars or []:
+            if not isinstance(c, dict):
+                continue
+            local = str(c.get("id") or "").strip()
+            if not local:
+                continue
+            gender = _norm_gender(c.get("gender"))
+
+            if local in self._by_key:
+                # 模型沿用了已知暫用 id → 同一角色
+                sid = self._by_key[local]
+                s = self._slot_of(sid)
+                if s:
+                    s["count"] = s.get("count", 0) + 1
+                    if page and (not s.get("first_page") or page < s["first_page"]):
+                        s["first_page"] = page
+                continue
+
+            # 未知暫用 id：先檢查是否有同 id 前綴可合併（模型常寫 c1 而非沿用）
+            sid = self._next_slot(gender)
+            self._by_key[local] = sid
+            self.slots.append({
+                "id": sid,
+                "slot": sid,
+                "gender": gender,
+                "first_page": page or 1,
+                "count": 1,
+            })
+        return self.slots
+
+    def remap_shot_cast(self, shots: list) -> None:
+        """把 shot 內的暫用角色 id 換成正式角色位。"""
+        for sh in shots or []:
+            ids = sh.get("character_ids")
+            if not isinstance(ids, list):
+                continue
+            out, seen = [], set()
+            for local in ids:
+                sid = self._by_key.get(str(local), str(local))
+                if sid not in seen:
+                    seen.add(sid)
+                    out.append(sid)
+            sh["character_ids"] = out
+
+    def as_prompt_context(self) -> str:
+        """給下一批模型看的角色位清單。"""
+        if not self.slots:
+            return ""
+        rows = [f"- {s['id']}（{s['gender']}，"
+                f"首次出現於第 {s.get('first_page','?')} 頁）"
+                for s in self.slots]
+        return ("\n【已確立的角色位（務必沿用相同編號，不可重新編號、不可描述外觀）】\n"
+                + "\n".join(rows))
+
+
+def migrate_legacy_cast(chars: list) -> list:
+    """把舊格式角色（帶 appearance_en）轉成角色位。
+
+    docs/CAST_SLOTS.md §8：舊資料保留於 <pid>.legacy.json，這裡只做讀取時轉換。
+    性別由舊 id/name 推測；推測不出者歸入路人。
+    """
+    out = []
+    for c in chars or []:
+        if not isinstance(c, dict):
+            continue
+        blob = f"{c.get('id','')} {c.get('name','')} {c.get('role','')}".lower()
+        gender = _SLOT_CROWD
+        if any(k in blob for k in ("女", "female", "girl", "woman", "她", "母", "姊")):
+            gender = _SLOT_FEMALE
+        elif any(k in blob for k in ("男", "male", "boy", "man", "他", "父", "哥")):
+            gender = _SLOT_MALE
+        out.append({"id": c.get("id", ""), "name": c.get("name", ""),
+                    "gender": _norm_gender(gender),
+                    "has_appearance": bool(c.get("appearance_en"))})
+    return out
+
+
 def human_pages(files) -> list:
     """把上傳的多個檔案轉為圖片物件清單（處理 GIF/PNG/BMP → RGB）。"""
     pages = []
@@ -386,16 +610,40 @@ PROMPT_READ = """你是一位專業的漫畫改編者，專精於把漫畫轉成
 【硬性規則】
 1. 對白框與擬聲詞**不要畫成畫面元素**，改寫成 dialogue / sfx 欄位
 2. 漫畫的速度線、集中線、色網點是靜態媒介語言，轉影片時**必須省略**
-3. 角色外觀必須在**每個 shot 的 prompt 中逐字重複嵌入**，不得用「同上」「該角色」
-   —— 繪圖模型無記憶，這是全片一致性的唯一保證
-4. 全片共用同一組風格關鍵詞
-5. shot 的 id 用兩位數，從 01 開始
+3. 全片共用同一組風格關鍵詞
+4. shot 的 id 用兩位數，從 01 開始
 
-【appearance 欄位格式】
-必須是**可直接餵給生圖模型的英文描述**：
-"16-year-old male, short black hair with bangs covering right eye, dark brown eyes,
-slim build, navy blue high-collar uniform jacket with silver badge, black bandage on right wrist"
-不要寫成中文敘述。"""
+【prompt 欄位該寫什麼】
+`prompt` 是生圖模型的輸入。在本架構下它**不描述角色長相**，
+只負責畫面本身：場景、構圖、光線、氣氛、動作節奏、畫風。
+
+  ✅ 正確範例：
+     "two characters standing apart in a wide corridor at dusk, tense atmosphere,
+      warm rim light from the left, deep shadows, static wide shot"
+
+  ❌ 錯誤範例（禁止）：
+     "a boy with short black hair and large eyes wearing a school uniform,
+      a girl with long blonde hair in a red ribbon"
+
+若你發現自己在寫任何人的外貌，代表走錯方向了。
+角色由參考圖決定，你的任務是**把參考圖放到正確的位置、做正確的事**。
+
+【角色位規則 —— 最高優先級】
+本系統採用**角色位**架構：角色是「位置」，不是「人」。
+外觀由後期的參考圖（reference）負責，你**完全不描述**。
+
+1. **禁止在任何欄位寫入外貌特徵**：髮色、瞳色、膚色、身高、體型、服裝、配件、
+   年齡、臉型，全部禁止出現在 prompt / action / expression / video_prompt。
+2. characters 陣列只標 `id`（暫用，如 c1）與 `gender`（female / male / crowd）。
+   正式編號（女1／男1／路人）由系統依首次出場順序分配，**你不要自己編**。
+3. `gender` 請依畫面中人物判定；無法判定的群眾、背影、遠景小人 → `crowd`。
+4. shot 的 `character_ids` 填該鏡頭**所有可見角色**的暫用 id。
+   這份清單是後期套用參考圖的依據，漏填就會漏掉角色。
+5. action / dialogue 可以提到角色位或代詞（「她轉頭」「女1 走向門口」），
+   但只描述**動作、情緒、姿態意圖**，不描述長相。
+6. **非人的可見實體**（動物、物件、意象、特效）走 `elements` 陣列，
+   不佔角色位編號。給它 id、名稱、英文描述。
+7. 角色位編號一經分配就不得改變：第 1 頁的 c1 在第 20 頁仍是同一個人。"""
 
 
 PROMPT_SUMMARY = """請為這一話的 AI 影像生成，撰寫一份**總結式（全局）提示詞文件`。
@@ -408,8 +656,11 @@ PROMPT_SUMMARY = """請為這一話的 AI 影像生成，撰寫一份**總結式
 預估長度：{duration}
 畫風關鍵詞：{style}
 
-【角色（外觀必須逐字沿用，不可改寫）】
+【角色位（只標編號與出場情形，禁止描述長相）】
 {characters}
+
+【非人元素（可描述外觀）】
+{elements}
 
 【場景】
 {scenes}
@@ -424,11 +675,10 @@ PROMPT_SUMMARY = """請為這一話的 AI 影像生成，撰寫一份**總結式
 一段可直接餵給生圖模型的英文提示詞，涵蓋：畫風、線稿特性、上色方式、色板、年代感、媒介質感。
 這段要能單獨套用到任何一個鏡頭。
 
-## 2. 角色速查
-每個角色一段，逐字沿用上面的 appearance，並補上：
-- 建議的出鏡景別
-- 表情基線
-- 不可出現的干擾（避免特徵被誤加）
+## 2. 角色位對照表
+用表格列出，欄位為：編號 | 出場次數 | 首次頁 | 情緒定位 | 建議景別。
+**本段禁止出現任何外貌描述**（髮色、瞳色、服裝、身高、體型、配件）。
+外觀由後期的參考圖負責，此處只需說明這個角色位在劇情中的功能。
 
 ## 3. 場景速查
 每個場景一段，逐字沿用上面的 description，並補上：
@@ -442,6 +692,8 @@ PROMPT_SUMMARY = """請為這一話的 AI 影像生成，撰寫一份**總結式
 
 ## 5. 統一負面提示詞
 列出全片共用的 negative prompt，針對生成瑕疵與風格偏移。
+**不要加入任何與角色外觀相關的負面詞**（例如 different hairstyle、face changed）——
+本架構的外觀不由此層負責。
 
 【要求】
 - 風格與場景段落用英文（要餵給生圖模型）
@@ -461,17 +713,38 @@ SCHEMA_SHOT = {
         },
         "characters": {
             "type": "array",
+            "description": (
+                "角色位清單。角色是位置不是人——只佔位，不描述外觀。"
+                "性別用 female/male 指定，分配器會依首次出場順序編成 女1/男1/路人。"
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string",
+                           "description": "暫用識別碼，如 c1。本批次內唯一即可，"
+                                          "正式編號由系統分配，勿自行編寫 女1/男1"},
+                    "gender": {"type": "string",
+                               "description": "性別：female / male / crowd"},
+                },
+                "required": ["id", "gender"],
+            },
+        },
+        "elements": {
+            "type": "array",
+            "description": (
+                "非人的可見實體：動物、物件、意象、特效。這些不佔角色位編號。"
+                "只要該頁有可見的這類元素就列出，純背景可不列。"
+            ),
             "items": {
                 "type": "object",
                 "properties": {
                     "id": {"type": "string"},
-                    "name": {"type": "string"},
-                    "role": {"type": "string"},
-                    "appearance_en": {"type": "string"},
-                    "personality": {"type": "string"},
-                    "ref_prompt": {"type": "string"},
+                    "name": {"type": "string",
+                             "description": "簡短中文名，例如「飛鳥」「手機」"},
+                    "description_en": {"type": "string",
+                                       "description": "英文外觀描述，逐字沿用不可改寫"},
                 },
-                "required": ["id", "name", "appearance_en", "ref_prompt"],
+                "required": ["id", "name", "description_en"],
             },
         },
         "scenes": {
@@ -496,7 +769,16 @@ SCHEMA_SHOT = {
                     "duration": {"type": "string"},
                     "shot_size": {"type": "string"},
                     "camera": {"type": "string"},
-                    "character_ids": {"type": "array", "items": {"type": "string"}},
+                    "character_ids": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "本鏡頭出現在場的角色暫用 id 清單。"
+                                       "這是後期合成時要套用的參考圖清單，"
+                                       "請確實列出本鏡頭所有可見角色。",
+                    },
+                    "element_ids": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "本鏡頭可見的非人實體（動物/物件/意象）id。",
+                    },
                     "scene_id": {"type": "string"},
                     "action": {"type": "string"},
                     "expression": {"type": "string"},
@@ -610,8 +892,9 @@ def run_analysis(pid: str, pages: list):
         # 90k context 下，一次灌 20 頁會爆；分批 + 沿用前一批已定義的角色/場景，
         # 可維持跨頁一致性而不致超出視窗。
         BATCH = int(os.environ.get("BATCH_PAGES", "6"))
-        prev_chars: list = []
+        registry = CastRegistry()
         prev_scenes: list = []
+        all_elements: dict = {}
         all_shots: list = []
         meta: dict = {}
 
@@ -627,23 +910,25 @@ def run_analysis(pid: str, pages: list):
                     parts.append({"type": "text", "text": f"\n以下是漫畫第 {start + i + 1} 頁："})
                 parts.append({"type": "image_url", "image_url": {"url": data_url(encode_image(p["img"]))}})
             parts.append({"type": "text", "text":
-                f"\n以上是第 {start + 1}–{start + len(chunk)} 頁。請為這幾頁產出分鏡資料。"
-                f"若已有角色／場景，沿用它們並補充新出現的。"
-                f"若為第二批之後，title 欄位填空字串即可。"})
+                f"\n以上是第 {start + 1}–{start + len(chunk)} 頁。請為這幾頁產出分鏡資料。"})
 
             carry = ""
-            if prev_chars or prev_scenes:
-                carry = "\n【已定義的角色（務必沿用相同 id 與 appearance_en，不可改寫）】\n"
-                carry += json.dumps(prev_chars, ensure_ascii=False)
-                carry += "\n\n【已定義的場景（務必沿用相同 id 與 description_en）】\n"
-                carry += json.dumps(prev_scenes, ensure_ascii=False)
+            cast_ctx = registry.as_prompt_context()
+            if cast_ctx or prev_scenes or all_elements:
+                carry = cast_ctx
+                if prev_scenes:
+                    carry += "\n\n【已定義的場景（務必沿用相同 id 與 description_en）】\n"
+                    carry += json.dumps(prev_scenes, ensure_ascii=False)
+                if all_elements:
+                    carry += "\n\n【已定義的元素（非人可見實體，務必沿用相同 id）】\n"
+                    carry += json.dumps(list(all_elements.values()),
+                                        ensure_ascii=False)
 
             head = (
                 f"這是漫畫的第 {start + 1} 到第 {start + len(chunk)} 頁。\n"
                 f"{carry}\n\n"
-                f"請為這幾頁產出分鏡資料。"
-                f"若已有角色/場景，沿用它們並補充新出現的。"
-                f"若為第二批之後，title 欄位填空字串即可。"
+                "請依【角色位規則】產出分鏡資料，務必沿用上面已定義的 id。\n"
+                "若為第二批之後，title 欄位填空字串即可。"
             )
 
             raw = chat(
@@ -664,18 +949,22 @@ def run_analysis(pid: str, pages: list):
                     "global_style": data.get("global_style", ""),
                 }
 
-            # 合併角色／場景（以 id 去重，後者不覆蓋前者）
-            seen_c = {c["id"]: c for c in prev_chars}
-            for c in data.get("characters", []) or []:
-                if c.get("id") and c["id"] not in seen_c:
-                    seen_c[c["id"]] = c
-            prev_chars = list(seen_c.values())
+            # ── 角色位對映：編號由程式層決定，不由模型決定 ──
+            # 必須在處理 shots 之前呼叫，因為 remap 需要 _by_key 已建立
+            slots = registry.admit(data.get("characters", []) or [], start + 1)
+            print(f"[{pid}] 批次 {start // BATCH + 1} 角色位："
+                  f"{[s['id'] for s in slots]}", flush=True)
 
-            seen_s = {s["id"]: s for s in prev_scenes}
+            # ── 元素合併（以 id 去重，後者不覆蓋前者）──
+            for el in data.get("elements", []) or []:
+                if isinstance(el, dict) and el.get("id") and el["id"] not in all_elements:
+                    all_elements[el["id"]] = el
+
+            seen_scenes = {s["id"]: s for s in prev_scenes}
             for s in data.get("scenes", []) or []:
-                if s.get("id") and s["id"] not in seen_s:
-                    seen_s[s["id"]] = s
-            prev_scenes = list(seen_s.values())
+                if s.get("id") and s["id"] not in seen_scenes:
+                    seen_scenes[s["id"]] = s
+            prev_scenes = list(seen_scenes.values())
 
             for s in data.get("shots", []) or []:
                 s["page"] = s.get("page") or (start + 1)
@@ -685,28 +974,54 @@ def run_analysis(pid: str, pages: list):
             print(f"[{pid}] 已處理 {start + len(chunk)}/{total} 頁，"
                   f"累計 {len(all_shots)} 顆鏡頭", flush=True)
 
-        # ── 重編鏡號，確保連續；補齊模型漏填的欄位 ──
+        # ── 角色位對映：把暫用 id 換成正式編號（女1／男1／路人）──
+        # 必須在序列重整之前做，因為重整會搬動 shot
+        registry.remap_shot_cast(all_shots)
+        for s in all_shots:
+            s.setdefault("element_ids", [])
+
         # ── 序列重整：把逐格對應重組成真正的鏡頭序列 ──
         before = len(all_shots)
-        all_shots = enforce_sequence(all_shots, prev_chars, prev_scenes)
+        all_shots = enforce_sequence(all_shots, registry.slots, prev_scenes)
         print(f"[{pid}] 序列重整：{before} 格 → {len(all_shots)} 個鏡頭", flush=True)
 
         neg = (
             "extra fingers, malformed hands, distorted face, asymmetric eyes, "
-            "inconsistent character design, text artifacts, gibberish text, "
-            "watermark, low quality, blurry"
+            "text artifacts, gibberish text, watermark, low quality, blurry"
         )
         for s in all_shots:
             s.setdefault("negative_prompt", neg)
             if not s.get("video_prompt"):
                 s["video_prompt"] = f"{s.get('action','')}; camera: {s.get('camera','static')}"
 
+        # ── 外觀殘留偵測（只報告，不自動修改）──
+        # 實測：模型常有「照抄輸入結構」的傾向，會在 prompt/action 裡自行
+        # 描述它看見的外貌，違反角色位規則。
+        #
+        # 刻意不自動清洗（PITFALLS 第二條）：用規則去剝英文外觀描述，本質是
+        # 猜自然語言——'eye' 在 'close-up of the eyes'（敘事）與 'dark eyes'
+        # （外觀）意義完全不同。自動改寫會製造「看起來乾淨但悄悄改壞」的結果。
+        # 正確處置是把問題呈現出來，由 /api/repair 讓模型依角色位規則重寫。
+        leaks = detect_appearance_leaks(all_shots)
+        if leaks:
+            print(f"[{pid}] ⚠ 偵測到 {len(leaks)} 處外觀殘留，"
+                  f"需重寫：{leaks[:6]}", flush=True)
+            leak_report = {
+                "count": len(leaks),
+                "shots": sorted({sid for sid, _ in leaks}),
+                "detail": [f"{sid} {tag}" for sid, tag in leaks],
+            }
+        else:
+            leak_report = None
+
         result = {
             **(meta or {"title": "", "logline": "", "estimated_duration": "", "global_style": ""}),
-            "characters": prev_chars,
+            "characters": registry.slots,
+            "elements": list(all_elements.values()),
             "scenes": prev_scenes,
             "shots": all_shots,
             "negative_prompt": neg,
+            "appearance_leaks": leak_report,
             "page_count": total,
         }
 
@@ -736,7 +1051,7 @@ def run_analysis(pid: str, pages: list):
             STORE[pid]["done_at"] = int(__import__("time").time())
         persist_project(pid, result)
         print(f"[{pid}] 完成，共 {len(all_shots)} 顆鏡頭、"
-              f"{len(prev_chars)} 個角色", flush=True)
+              f"{len(registry.slots)} 個角色位", flush=True)
 
     except Exception as e:  # noqa: BLE001
         print(f"[{pid}] 失敗：{e}", flush=True)
@@ -945,12 +1260,17 @@ async def api_export(pid: str, fmt: str = "json"):
         import csv
         import io as _io
         buf = _io.StringIO()
-        cols = ["id", "page", "duration", "shot_size", "camera", "action",
+        cols = ["id", "page", "duration", "shot_size", "camera",
+                "character_ids", "element_ids", "action",
                 "dialogue", "sfx", "prompt", "negative_prompt", "video_prompt"]
         w = csv.writer(buf)
         w.writerow(cols)
         for sh in d.get("shots", []):
-            w.writerow([sh.get(c, "") for c in cols])
+            row = []
+            for c in cols:
+                v = sh.get(c, "")
+                row.append("、".join(v) if isinstance(v, list) else v)
+            w.writerow(row)
         return Response(buf.getvalue(), media_type="text/csv; charset=utf-8",
                         headers={"Content-Disposition":
                                  f'attachment; filename="{pid}.csv"'})
@@ -963,18 +1283,28 @@ async def api_export(pid: str, fmt: str = "json"):
              "## 全域畫風", "", f"`{d.get('global_style','')}`", ""]
         if d.get("art_bible"):
             L += ["## 全域美術基準", "", d["art_bible"], "", "---", ""]
-        L += ["## 角色設定檔", ""]
+        L += ["## 角色位（外觀由後期參考圖負責，此處留白）", "",
+              "| 編號 | 性別 | 出場 | 首次頁 |", "|---|---|---|---|"]
         for c in d.get("characters", []):
-            L += [f"### {c.get('id')} {c.get('name','')}", "",
-                  f"- 外觀（逐字不可改）：`{c.get('appearance_en','')}`",
-                  f"- 性格：{c.get('personality','')}", ""]
+            L.append(f"| {c.get('id')} | "
+                     f"{c.get('gender')} | "
+                     f"{c.get('count','')} 次 | 第 {c.get('first_page','?')} 頁 |")
+        L.append("")
+        if d.get("elements"):
+            L += ["## 非人元素", ""]
+            for e in d["elements"]:
+                L.append(f"- **{e.get('id')}** {e.get('name','')}："
+                         f"`{e.get('description_en','')}`")
+            L.append("")
         L += ["## 場景", ""]
         for sc in d.get("scenes", []):
             L += [f"- **{sc.get('id')}** {sc.get('name','')}：{sc.get('description_en','')}", ""]
         L += ["## 逐鏡描述", ""]
         for sh in d.get("shots", []):
+            cast = "、".join(sh.get("character_ids") or []) or "（無）"
             L += [f"### {sh.get('id')}　`{sh.get('duration','')}`　"
                   f"{sh.get('shot_size','')} / {sh.get('camera','')}", "",
+                  f"**在場角色位**：{cast}",
                   f"**動作**：{sh.get('action','')}"]
             if sh.get("dialogue"):
                 L.append(f"**對白**：「{sh['dialogue']}」")
@@ -1114,14 +1444,24 @@ PROMPT_SHEET = """你是一位電影分鏡版（storyboard sheet）繪製者。
 畫風：{style}
 總時長：{duration}
 
-【角色（外觀必須逐字沿用，不可改寫）】
+【角色位（只標編號與出場情形，禁止描述長相）】
 {characters}
+
+【非人元素（可描述外觀）】
+{elements}
 
 【場景】
 {scenes}
 
 【鏡頭序列】
 {shots}
+
+【角色位規則 —— 最高優先級】
+1. **禁止在任何地方描述角色長相**：髮色、瞳色、膚色、身高、體型、服裝、配件，
+   一律不可寫入。角色由參考圖決定，本提示詞只描述畫面本身。
+2. 每格只寫：場景、構圖、光線、氣氛、動作、景別、角色位編號。
+3. 需要標示角色時用角色位編號或構圖位置（例如 "a figure at frame left"），
+   不要寫長相特徵。
 
 【任務】
 產出一個英文提示詞，要點是**單張圖內的多格分鏡排版**，不是單一場景。
@@ -1164,9 +1504,15 @@ NOTES:
 
 def build_sheet_prompt(d: dict, aspect: str = "3:2") -> dict:
     """產生整張視覺分鏡版的提示詞。"""
+    # 角色位：只報編號與出場次數，不含外觀（docs/CAST_SLOTS.md §5）
     chars = "\n".join(
-        f"- {c.get('id')} {c.get('name','')}：{c.get('appearance_en','')}"
+        f"- {c.get('id')}（{c.get('gender')}，"
+        f"出場 {c.get('count','')} 次，"
+        f"首次第 {c.get('first_page','?')} 頁）"
         for c in d.get("characters", [])) or "（無）"
+    elements = "\n".join(
+        f"- {e.get('id')} {e.get('name','')}：{e.get('description_en','')}"
+        for e in d.get("elements", []) or []) or "（無）"
     scenes = "\n".join(
         f"- {sc.get('id')} {sc.get('name','')}：{sc.get('description_en','')}"
         for sc in d.get("scenes", [])) or "（無）"
@@ -1182,7 +1528,7 @@ def build_sheet_prompt(d: dict, aspect: str = "3:2") -> dict:
         logline=d.get("logline") or "-",
         style=d.get("global_style") or "clean lineart",
         duration=d.get("estimated_duration") or "-",
-        characters=chars, scenes=scenes, shots=shots or "-")
+        characters=chars, elements=elements, scenes=scenes, shots=shots or "-")
 
     txt = chat([{"role": "user", "content": prompt}],
                temperature=0.35, max_tokens=2500)
@@ -1192,8 +1538,16 @@ def build_sheet_prompt(d: dict, aspect: str = "3:2") -> dict:
                       txt, re.S | re.I)
         return m.group(1).strip() if m else ""
 
+    # 完整性檢查：PROMPT: 標籤必須存在，且實質長度足夠。
+    # 舊實作缺標籤時會退化成 txt[:800]，把整段回應（含 NOTES 中文說明）
+    # 當成生圖提示詞餵給模型——這是靜默劣化，不能接受。
+    if len(grab("PROMPT")) < 40:
+        raise RuntimeError(
+            f"分鏡版提示詞不完整（PROMPT 段僅 {len(grab('PROMPT'))} 字，"
+            f"總回應 {len(txt)} 字）：模型可能未遵守三段格式")
+
     return {
-        "prompt": grab("PROMPT") or txt.strip()[:800],
+        "prompt": grab("PROMPT"),
         "negative": grab("NEGATIVE"),
         "notes": grab("NOTES"),
         "aspect": aspect,
@@ -1210,15 +1564,22 @@ SHEET_SIZES = {
 
 def build_art_bible(d: dict) -> str:
     """把分鏡結果提煉成一份全局美術基準文件。"""
+    # 角色位只報編號與出場統計，不含外觀（docs/CAST_SLOTS.md §6.4）
     chars = "\n".join(
-        f"- {c.get('id')} {c.get('name','')}（{c.get('role','')}）：{c.get('appearance_en','')}"
+        f"- {c.get('id')}（{c.get('gender')}，"
+        f"出場 {c.get('count','')} 次，"
+        f"首次第 {c.get('first_page','?')} 頁）"
         for c in d.get("characters", [])) or "（無）"
+    elements = "\n".join(
+        f"- {e.get('id')} {e.get('name','')}：{e.get('description_en','')}"
+        for e in d.get("elements", []) or []) or "（無）"
     scenes = "\n".join(
         f"- {sc.get('id')} {sc.get('name','')}：{sc.get('description_en','')}"
         for sc in d.get("scenes", [])) or "（無）"
     shots = "\n".join(
         f"- {sh.get('id')}（{sh.get('duration','')}｜{sh.get('shot_size','')}｜"
         f"{sh.get('camera','')}｜情緒：{sh.get('mood','')}）"
+        f"\n  在場角色位：{'、'.join(sh.get('character_ids') or []) or '（無）'}"
         f"\n  動作：{sh.get('action','')}"
         + (f"\n  對白：「{sh['dialogue']}」" if sh.get("dialogue") else "")
         for sh in d.get("shots", []))
@@ -1228,11 +1589,28 @@ def build_art_bible(d: dict) -> str:
         logline=d.get("logline") or "（未提供）",
         duration=d.get("estimated_duration") or "（未估算）",
         style=d.get("global_style") or "（未指定）",
-        characters=chars, scenes=scenes, shots=shots or "（無）")
+        characters=chars, elements=elements, scenes=scenes,
+        shots=shots or "（無）")
 
-    txt = chat([{"role": "user", "content": prompt}],
-               temperature=0.35, max_tokens=4000)
-    return txt.strip()
+    # 完整性檢查：PITFALLS 第四條——LLM 輸出要當成可能損壞的輸入。
+    # 實測曾出現只回 30 字就斷在 '> **' 的情況（高負載下的非確定性截斷），
+    # 五個必要段落一個都沒有，這種結果不能當成功。
+    need = ["## 1.", "## 2.", "## 3.", "## 4.", "## 5."]
+    last = ""
+    for attempt in range(3):
+        txt = chat([{"role": "user", "content": prompt}],
+                   temperature=0.35, max_tokens=4000).strip()
+        missing = [h for h in need if h not in txt]
+        if not missing:
+            return txt
+        last = f"缺少段落 {'、'.join(missing)}（實得 {len(txt)} 字）"
+        print(f"[art_bible] 第 {attempt + 1} 次輸出不完整：{last}，重試",
+              flush=True)
+        # 收斂提示，要求完整輸出五個段落
+        prompt += (f"\n\n【重要】上一次回應在 {len(txt)} 字處被截斷，"
+                   f"缺少 {'、'.join(missing)}。"
+                   f"請從頭完整輸出全部五個段落，勿縮水任何一節。")
+    raise RuntimeError(f"美術基準生成不完整：{last}")
 
 
 # ── 自我修復端點 ──

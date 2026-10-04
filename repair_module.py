@@ -14,16 +14,23 @@ CAUSE_RULES = [
         "fix_prompt": "Reuse the SAME seed across all shots of this character. "
                       "Repeat the identical style tag verbatim at the end of every prompt.",
         "fix_negative": "varying art styles, inconsistent line weight, mixed rendering techniques",
+        "note": "角色外觀不在此層負責，seed 固定只影響風格層級。",
     },
     {
         "id": "R-CHAR-DRIFT",
-        "trigger": ["角色長得不像", "每格長得都不一樣", "每格是不同的人", "角色走樣", "臉變了", "髮色不對", "服裝不一致", "換個人", "角色不像同一人", "角色每次都變", "臉不像", "服裝變了", "換了衣服", "不是同一個人"],
-        "cause": "角色外觀描述在提示詞中被改寫、簡化或省略。生圖模型無記憶，"
-                 "「該角色」這類指涉無法解析，只能自由發揮——於是每格各自隨機。",
-        "fix_prompt": "Paste the COMPLETE character appearance description verbatim at the START of "
-                      "every prompt. Never abbreviate, never use pronouns or 'the same character'.",
-        "fix_negative": "multiple different characters, identity drift, face changed, "
-                        "different hairstyle, different outfit",
+        "trigger": ["角色長得不像", "每格長得都不一樣", "每格是不同的人", "角色走樣", "臉變了", "髮色不對", "服裝不一致", "換個人", "角色不像同一人", "角色每次都變", "臉不像", "服裝變了", "換了衣服", "不是同一個人", "角色外觀不對", "角色漂移", "身份對不上"],
+        "cause": "本系統採用角色位（cast slot）架構：外觀由後期參考圖（reference）負責，"
+                 "分鏡層刻意不描述任何外貌。因此角色走樣**不是提示詞的問題**，"
+                 "而是參考圖未正確對應到 character_ids 所指定的角色位。",
+        "fix_prompt": "Character appearance is owned by the reference images and must NOT be "
+                      "described here. Make the cast reference explicit and unambiguous in the "
+                      "action text instead: name the slot at the start of the action "
+                      "('女1 turns toward the window'), so the right reference image is bound "
+                      "to the right slot. Never add hair/eye/clothing/height descriptions.",
+        "fix_negative": "identity drift, inconsistent character reference, "
+                        "mismatched reference binding, extra characters in frame",
+        "note": "本架構下 R-CHAR-DRIFT 的正確處置是檢查 character_ids 與參考圖的對應，"
+                "而不是在提示詞中補外觀描述。若要改變角色外觀，請更換參考圖。",
     },
     {
         "id": "R-HAND-DEFECT",
@@ -61,11 +68,12 @@ CAUSE_RULES = [
     {
         "id": "R-TEXT-ARTIFACT",
         "trigger": ["有字", "亂碼", "文字", "浮水印", "奇怪的字", "殘留文字", "殘留字", "多了字", "出現文字", "有浮水印"],
-        "cause": "提示詞含可被渲染成文字的字串（例如角色名字），"
+        "cause": "提示詞含可被渲染成文字的字串（例如具體人名、地名），"
                  "或負面提示詞中出現 text / watermark 等詞，"
                  "生圖模型有時會把它們畫出來。",
-        "fix_prompt": "Remove all text-like tokens from the prompt. Replace character names "
-                      "with pure visual descriptors. Do not include any word that should "
+        "fix_prompt": "Remove all text-like tokens from the prompt. Use cast slot labels "
+                      "(女1, 男1, 路人) rather than proper names — slot labels are structural, "
+                      "not renderable text. Do not include any word that should "
                       "appear as visible text.",
         "fix_negative": "text, letters, watermark, signature, caption, subtitle, speech bubble",
     },
@@ -126,8 +134,10 @@ PROMPT_DIAGNOSE = """你是一位資深的 AI 生圖流程調校工程師。
 【使用的提示詞】
 {prompt}
 
-【角色設定】
+【角色位（cast slots）】
 {characters}
+注意：本系統的角色**不描述外觀**。角色位只是位置編號（女1／男1／路人），
+外觀由後期參考圖負責。
 
 【使用者報告的問題】
 {symptom}
@@ -149,13 +159,15 @@ PROMPT_DIAGNOSE = """你是一位資深的 AI 生圖流程調校工程師。
 
 **第二步：重寫提示詞。**
 遵守以下規則：
-1. 角色設定**逐字保留，不可改寫、不可簡化、不可省略**
-2. 把否定語改寫為正向描述
-3. 每則提示詞只承擔一個主要意圖
-4. 關鍵特徵放在**提示詞開頭**（模型對開頭注意力較強）
-5. 只改動與本次問題相關的部分，其他部分保持原樣
-6. 保持英文
-7. 若根因是構圖難以避免（如手部），可提供替代構圖而非硬修
+1. **禁止新增任何外貌描述**——髮色、瞳色、膚色、身高、體型、服裝、配件一律不可寫入。
+   本架構的外觀由參考圖負責，寫進提示詞只會與參考圖衝突。
+2. 角色一律以角色位指涉（女1／男1／路人），且在動作描述開頭明確點名，確保參考圖對應正確
+3. 把否定語改寫為正向描述
+4. 每則提示詞只承擔一個主要意圖
+5. 關鍵特徵放在**提示詞開頭**（模型對開頭注意力較強）
+6. 只改動與本次問題相關的部分，其他部分保持原樣
+7. 保持英文
+8. 若根因是構圖難以避免（如手部），可提供替代構圖而非硬修
 
 **第三步：預測殘餘風險。**
 說明這次修改後，哪些既有問題可能被修復、哪些仍可能存在。

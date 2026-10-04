@@ -197,8 +197,9 @@ tr:hover td{background:#1a1f2b}
         </div>
       </div>
       <div class="card">
-        <h2>🎭 角色設定檔 <span class="hint" style="display:inline">（一致性關鍵，之後每格提示詞都會逐字引用）</span></h2>
+        <h2>🎭 角色位 <span class="hint" style="display:inline">（角色只是位置，外觀留白給後期參考圖套用）</span></h2>
         <div id="chars"></div>
+        <div id="elements" style="margin-top:12px"></div>
       </div>
       <div class="card">
         <h2>🏙 場景表</h2>
@@ -225,7 +226,8 @@ tr:hover td{background:#1a1f2b}
             <thead><tr>
               <th style="width:62px">鏡號</th><th style="width:44px">頁</th>
               <th style="width:96px">時長</th><th style="width:92px">景別</th>
-              <th style="width:96px">運鏡</th><th>動作 / 對白</th>
+              <th style="width:96px">運鏡</th><th style="width:110px">在場角色位</th>
+              <th>動作 / 對白</th>
               <th style="width:210px">生圖提示詞</th><th style="width:96px">狀態</th>
             </tr></thead>
             <tbody id="tBody"></tbody>
@@ -262,8 +264,8 @@ tr:hover td{background:#1a1f2b}
           <textarea id="tp" rows="6" placeholder="貼上要審查的鏡頭提示詞"
             style="width:100%;background:#0c0e14;border:1px solid var(--line);border-radius:7px;
                    padding:10px;color:var(--fg);font-family:ui-monospace,monospace;font-size:12px"></textarea>
-          <label class="hint" style="display:block;margin-top:10px">角色設定（選填，但強烈建議填，否則無法檢查一致性）</label>
-          <textarea id="cc" rows="4" placeholder="貼上該角色的 appearance 描述"
+          <label class="hint" style="display:block;margin-top:10px">角色位（選填。本系統不描述外觀，填編號即可）</label>
+          <textarea id="cc" rows="4" placeholder="例：女1、男1（在場角色位編號）"
             style="width:100%;background:#0c0e14;border:1px solid var(--line);border-radius:7px;
                    padding:10px;color:var(--fg);font-family:ui-monospace,monospace;font-size:12px"></textarea>
           <textarea id="ex" rows="2" placeholder="補充說明（選填），例：我覺得角色臉不像"
@@ -319,7 +321,7 @@ tr:hover td{background:#1a1f2b}
                    padding:10px;color:var(--fg);font-family:ui-monospace,monospace;font-size:12px"></textarea>
           <div class="row" style="margin-top:10px">
             <div style="flex:1">
-              <label class="hint">角色設定（強烈建議填）</label>
+              <label class="hint">角色位（選填。本系統不描述外觀）</label>
               <textarea id="f_chars" rows="4"
                 style="width:100%;background:#0c0e14;border:1px solid var(--line);border-radius:7px;
                        padding:10px;color:var(--fg);font-family:ui-monospace,monospace;font-size:12px"></textarea>
@@ -490,7 +492,21 @@ function render(d){
       <span class="tag">頁數 ${d.page_count}</span>
       <span class="tag">鏡頭 ${d.shots.length}</span>
       <span class="tag">預估 ${esc(d.estimated_duration||'?')}</span></div>
-    <div style="margin-top:12px"><span class="hint">全域畫風：</span><code style="font-size:12px">${esc(d.global_style||'')}</code></div>`;
+    <div style="margin-top:12px"><span class="hint">全域畫風：</span><code style="font-size:12px">${esc(d.global_style||'')}</code></div>`
+    +(d._migrated_from?`<div style="margin-top:12px;padding:9px 12px;border-radius:7px;
+        border:1px solid var(--warn,#c9a227);background:rgba(201,162,39,.08);font-size:12px">
+        <b>⚠ 此專案由舊格式遷移</b><br>
+        角色位已就緒，但舊鏡頭的生圖提示詞仍內嵌原本的外觀描述
+        （原文保留於內部 <code>_prompt_legacy</code>）。<br>
+        投入新流程前，請用「⚠ 修復」重寫提示詞以移除外觀描述。</div>`:'')
+    +(d.appearance_leaks&&d.appearance_leaks.count?`
+      <div style="margin-top:10px;padding:9px 12px;border-radius:7px;
+        border:1px solid var(--bad,#c0392b);background:rgba(192,57,43,.08);font-size:12px">
+        <b>⚠ 偵測到外觀殘留（${d.appearance_leaks.count} 處）</b><br>
+        受影響鏡頭：<code>${(d.appearance_leaks.shots||[]).map(esc).join('、')}</code><br>
+        這些鏡頭的提示詞仍描述了角色外貌，與角色位架構衝突。
+        請逐鏡點「⚠ 修復」重寫以移除外觀描述——系統不會自動改寫，因為
+        自動剝除英文外觀詞容易誤傷敘事描述。</div>`:'');
 
   // 美術基準
   if(d.art_bible){
@@ -516,20 +532,29 @@ function render(d){
     $('#sheetCard').style.display='none';
   }
 
+  // 角色位：只顯示編號與出場統計，刻意不顯示外觀（docs/CAST_SLOTS.md）
+  const GENDER={female:'女',male:'男',crowd:'群眾'};
   $('#chars').innerHTML=(d.characters||[]).map(c=>`
     <div style="border:1px solid var(--line);border-radius:8px;padding:12px;margin-bottom:9px">
       <div class="row" style="justify-content:space-between">
-        <b><span class="tag CH">${esc(c.id)}</span>${esc(c.name||'')}</b>
-        <span class="tag">${esc(c.role||'')}</span></div>
-      <div style="margin-top:7px;font-size:13px"><b>外觀 appearance_en（逐字不可改）：</b><br>
-        <span style="color:var(--mut)">${esc(c.appearance_en||'')}</span></div>
-      <div class="hint" style="margin:6px 0">性格：${esc(c.personality||'')}　語氣：${esc(c.voice||'')}</div>
-      <div style="font-size:12px"><b>定裝照提示詞：</b></div>
-      <pre style="max-height:none">${esc(c.ref_prompt||'')}</pre>
-      <button class="ghost sm" data-cp="${esc(c.appearance_en||'')}">複製外觀描述</button>
+        <b><span class="tag CH">${esc(c.id)}</span></b>
+        <span class="tag">${esc(GENDER[c.gender]||c.gender||'')}</span></div>
+      <div class="hint" style="margin-top:7px">
+        出場 <b>${esc(c.count??0)}</b> 次　·　首次出現於第 <b>${esc(c.first_page??'?')}</b> 頁</div>
+      <div class="hint" style="margin-top:6px">
+        外觀由後期參考圖（reference）負責，此處刻意留白。套用時請對應 <code>character_ids</code>。</div>
     </div>`).join('')||'<div class="empty">未辨識到角色</div>';
-  $('#chars').onclick=e=>{const b=e.target.closest('[data-cp]');
-    if(b){navigator.clipboard.writeText(b.dataset.cp);toast('已複製');}};
+
+  // 非人元素：這些可以描述外觀
+  const els=d.elements||[];
+  $('#elements').innerHTML=els.length?`
+    <div style="font-size:13px;margin-bottom:8px"><b>非人元素</b>
+      <span class="hint" style="display:inline">（動物／物件／意象，不佔角色位編號，可描述外觀）</span></div>`
+    +els.map(e=>`
+    <div style="border:1px solid var(--line);border-radius:8px;padding:11px;margin-bottom:8px">
+      <b><span class="tag">${esc(e.id)}</span>${esc(e.name||'')}</b>
+      <div style="margin-top:6px;font-size:13px;color:var(--mut)">${esc(e.description_en||'')}</div>
+    </div>`).join(''):'';
 
   $('#scenes').innerHTML=(d.scenes||[]).map(s=>`
     <div style="border:1px solid var(--line);border-radius:8px;padding:11px;margin-bottom:8px">
@@ -544,6 +569,8 @@ function render(d){
     <td>${s.page||''}</td><td>${esc(s.duration||'')}</td>
     <td style="font-size:12px">${esc(s.shot_size||'')}</td>
     <td style="font-size:12px">${esc(s.camera||'')}</td>
+    <td style="font-size:12px">${(s.character_ids||[]).map(x=>
+        `<span class="tag CH">${esc(x)}</span>`).join(' ')||'<span class="hint">—</span>'}</td>
     <td style="font-size:12px">${esc(s.action||'')}
       ${s.dialogue?`<div style="color:var(--acc);margin-top:4px">「${esc(s.dialogue)}」</div>`:''}
       ${s.sfx?`<div style="color:var(--acc2);margin-top:2px">♪ ${esc(s.sfx)}</div>`:''}</td>
@@ -563,7 +590,10 @@ $('#tBody').onclick=e=>{
     $('#f_shot').value=s.id||'';
     const cid=(s.character_ids||[])[0];
     const c=DATA.characters.find(x=>x.id===cid);
-    $('#f_chars').value=c?c.appearance_en||'':'';
+    // 角色位架構：沒有外觀描述可帶，改填角色位資訊供診斷參考
+    $('#f_chars').value=c
+      ?`角色位 ${c.id}（${c.gender||''}，全片出場 ${c.count??'?'} 次）——外觀由參考圖負責`
+      :'';
     $('#f_img').value='';
     $('#fxOut').classList.add('hidden');
     $$('.tab')[2].click();
@@ -678,7 +708,8 @@ async function loadProjects(){
       `<div data-pid="${p.id}" style="border:1px solid var(--line);border-radius:8px;
             padding:9px 13px;cursor:pointer;min-width:180px">
         <b style="font-size:13px">${esc(p.title)}</b>
-        <div class="hint">${p.shots} 鏡頭 · ${p.characters} 角色 · ${p.page_count} 頁</div>
+        <div class="hint">${p.shots} 鏡頭 · ${p.characters} 角色位 · ${p.page_count} 頁
+          ${p.migrated?' · <span style="color:var(--warn,#c9a227)">舊格式已遷移</span>':''}</div>
         <div class="hint">${new Date(p.done_at*1000).toLocaleString('zh-TW')}</div>
       </div>`).join('')+`</div>`;
     $('#histList').onclick=e=>{
@@ -712,9 +743,10 @@ function pollDone(pid){
 }
 
 /* ══════════ TAB C：修復 ══════════ */
-const QUICK=['手變成六根手指','角色每格長得都不一樣','角色服裝變了','背景多出不該有的東西',
+const QUICK=['手變成六根手指','參考圖套用到錯誤的角色位','角色外觀跟參考圖不符',
+             '背景多出不該有的東西',
              '構圖不對，主體太小','有殘留文字或浮水印','動作很怪／扭曲','光線太平沒有立體感',
-             '畫風跟其他格不一致','角色臉不像'];
+             '畫風跟其他格不一致','參考圖沒有被正確套用'];
 QUICK.forEach(q=>{const b=document.createElement('button');
   b.className='ghost sm';b.textContent=q;
   b.onclick=()=>{$('#f_sym').value=($('#f_sym').value?q
